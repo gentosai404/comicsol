@@ -1,0 +1,67 @@
+{
+  "attempts": 1,
+  "checks": [
+    {
+      "evidence": "synthetic fixture inspected; geometry and pixels are readable",
+      "id": "character-identity",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "synthetic fixture inspected; geometry and pixels are readable",
+      "id": "anatomy",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "synthetic fixture inspected; geometry and pixels are readable",
+      "id": "action",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "synthetic fixture inspected; geometry and pixels are readable",
+      "id": "composition",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "synthetic fixture inspected; geometry and pixels are readable",
+      "id": "continuity",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "synthetic fixture inspected; geometry and pixels are readable",
+      "id": "text-free",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "synthetic fixture inspected; geometry and pixels are readable",
+      "id": "technical",
+      "result": "pass",
+      "severity": "error"
+    }
+  ],
+  "clean_path": "panels/clean/p01-01.png",
+  "decision": "accept",
+  "dimensions": {
+    "height": 1136,
+    "width": 736
+  },
+  "generation": {
+    "capability_name": "offline-synthetic-fixture",
+    "completed_at": "2026-07-18T06:00:00Z",
+    "reference_paths": [
+      "references/characters/mira.png"
+    ]
+  },
+  "panel_id": "p01-01",
+  "raw_path": "panels/raw/p01-01.png",
+  "raw_sha256": "a1d4624971ee2848fab87a3466c52ce95d9ada144b8fe44b81dbd88d85013bea",
+  "retry_reason": null,
+  "schema_version": "1.0",
+  "source_prompt_path": "prompts/panels/p01-01.txt",
+  "unresolved_warnings": []
+}

@@ -1,0 +1,67 @@
+{
+  "attempts": 1,
+  "checks": [
+    {
+      "evidence": "Live panel visually reviewed against canonical reference and storyboard.",
+      "id": "character-identity",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "Live panel visually reviewed against canonical reference and storyboard.",
+      "id": "anatomy",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "Live panel visually reviewed against canonical reference and storyboard.",
+      "id": "action",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "Live panel visually reviewed against canonical reference and storyboard.",
+      "id": "composition",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "Live panel visually reviewed against canonical reference and storyboard.",
+      "id": "continuity",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "Live panel visually reviewed against canonical reference and storyboard.",
+      "id": "text-free",
+      "result": "pass",
+      "severity": "error"
+    },
+    {
+      "evidence": "Live panel visually reviewed against canonical reference and storyboard.",
+      "id": "technical",
+      "result": "pass",
+      "severity": "error"
+    }
+  ],
+  "clean_path": "panels/clean/p02-02.png",
+  "decision": "accept",
+  "dimensions": {
+    "height": 779,
+    "width": 1024
+  },
+  "generation": {
+    "capability_name": "built-in-imagegen-gpt-image-2",
+    "completed_at": "2026-07-18T12:00:00Z",
+    "reference_paths": [
+      "references/characters/mira.png"
+    ]
+  },
+  "panel_id": "p02-02",
+  "raw_path": "panels/raw/p02-02.png",
+  "raw_sha256": "3c7a83b584f69e0c9288d67f14643f71fb49a10e089585a66d9cd52731469e55",
+  "retry_reason": null,
+  "schema_version": "1.0",
+  "source_prompt_path": "prompts/panels/p02-02.txt",
+  "unresolved_warnings": []
+}

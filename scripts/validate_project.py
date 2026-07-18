@@ -1,0 +1,997 @@
+#!/usr/bin/env python3
+"""Strict offline validation for Comic Sol version-1.0 artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Iterable
+
+from PIL import Image, UnidentifiedImageError
+
+from comic_sol import (
+    ALL_STATUSES,
+    GUTTER,
+    MARGIN,
+    PAGE_HEIGHT,
+    PAGE_WIDTH,
+    layout_rects,
+    rectangles_overlap,
+    sha256_file,
+)
+
+
+ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+PANEL_ID_PATTERN = re.compile(r"^p[0-9]{2}-[0-9]{2}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+TIMESTAMP_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+STAGES = ("all", "plan", "storyboard", "panels", "final")
+LAYOUTS = {
+    "full-page",
+    "two-horizontal",
+    "three-horizontal",
+    "hero-top-two-bottom",
+    "two-top-hero-bottom",
+}
+ANCHORS = {
+    "top-left", "top-center", "top-right", "middle-left", "middle-right",
+    "bottom-left", "bottom-center", "bottom-right",
+}
+CHECK_IDS = (
+    "character-identity", "anatomy", "action", "composition", "continuity",
+    "text-free", "technical",
+)
+
+
+@dataclass(frozen=True)
+class ValidationIssue:
+    path: str
+    field: str
+    message: str
+
+
+class ProjectValidationError(ValueError):
+    def __init__(self, issues: Iterable[ValidationIssue]):
+        self.issues = tuple(issues)
+        super().__init__(f"Comic Sol project has {len(self.issues)} validation issue(s)")
+
+
+def _sorted(issues: Iterable[ValidationIssue]) -> list[ValidationIssue]:
+    return sorted(issues, key=lambda item: (item.path, item.field, item.message))
+
+
+def _add(issues: list[ValidationIssue], path: str, field: str, message: str) -> None:
+    issues.append(ValidationIssue(path, field, message))
+
+
+def _object(
+    value: object,
+    allowed: set[str],
+    required: set[str],
+    issues: list[ValidationIssue],
+    path: str,
+    field: str,
+) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        _add(issues, path, field, "must be an object")
+        return None
+    for key in sorted(set(value) - allowed):
+        _add(issues, path, f"{field}.{key}".strip("."), "unknown field")
+    for key in sorted(required - set(value)):
+        _add(issues, path, f"{field}.{key}".strip("."), "required field is missing")
+    return value
+
+
+def _nonempty_string(
+    value: object, issues: list[ValidationIssue], path: str, field: str
+) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        _add(issues, path, field, "must be a non-empty string")
+        return False
+    return True
+
+
+def _identifier(value: object, issues: list[ValidationIssue], path: str, field: str) -> bool:
+    if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
+        _add(issues, path, field, "must match ^[a-z][a-z0-9-]{0,47}$")
+        return False
+    return True
+
+
+def _integer(
+    value: object,
+    minimum: int,
+    maximum: int,
+    issues: list[ValidationIssue],
+    path: str,
+    field: str,
+) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        _add(issues, path, field, f"must be an integer from {minimum} to {maximum}")
+        return False
+    return True
+
+
+def _relative_path(
+    value: object,
+    issues: list[ValidationIssue],
+    path: str,
+    field: str,
+    nullable: bool = False,
+) -> bool:
+    if nullable and value is None:
+        return True
+    if not isinstance(value, str) or not value:
+        _add(issues, path, field, "must be a relative project path")
+        return False
+    if "\\" in value:
+        _add(issues, path, field, "must use POSIX separators")
+        return False
+    parts = value.split("/")
+    if value.startswith("/") or re.match(r"^[A-Za-z]:/", value) or any(part in {"", ".", ".."} for part in parts):
+        _add(issues, path, field, "must be a normalized relative project path without traversal")
+        return False
+    return True
+
+
+def _sha256(
+    value: object,
+    issues: list[ValidationIssue],
+    path: str,
+    field: str,
+    nullable: bool = False,
+) -> bool:
+    if nullable and value is None:
+        return True
+    if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+        _add(issues, path, field, "must be a lowercase 64-character SHA-256")
+        return False
+    return True
+
+
+def _timestamp(
+    value: object,
+    issues: list[ValidationIssue],
+    path: str,
+    field: str,
+    nullable: bool = False,
+) -> bool:
+    if nullable and value is None:
+        return True
+    if not isinstance(value, str) or TIMESTAMP_PATTERN.fullmatch(value) is None:
+        _add(issues, path, field, "must be an ISO 8601 UTC timestamp")
+        return False
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        _add(issues, path, field, "must be an ISO 8601 UTC timestamp")
+        return False
+    return True
+
+
+def _string_list(
+    value: object,
+    issues: list[ValidationIssue],
+    path: str,
+    field: str,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> list[str] | None:
+    if not isinstance(value, list):
+        _add(issues, path, field, "must be an array")
+        return None
+    if len(value) < minimum or (maximum is not None and len(value) > maximum):
+        upper = "unbounded" if maximum is None else str(maximum)
+        _add(issues, path, field, f"must contain {minimum} to {upper} items")
+    for index, item in enumerate(value):
+        _nonempty_string(item, issues, path, f"{field}[{index}]")
+    return [item for item in value if isinstance(item, str)]
+
+
+def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
+    path = "project.json"
+    issues: list[ValidationIssue] = []
+    fields = {
+        "schema_version", "project_id", "title", "created_at", "updated_at",
+        "status", "input", "settings", "capability", "artifacts",
+        "stage_versions", "panels", "warnings",
+    }
+    root = _object(data, fields, fields, issues, path, "")
+    if root is None:
+        return _sorted(issues)
+    if root.get("schema_version") != "1.0":
+        _add(issues, path, "schema_version", "must equal 1.0")
+    _identifier(root.get("project_id"), issues, path, "project_id")
+    _nonempty_string(root.get("title"), issues, path, "title")
+    _timestamp(root.get("created_at"), issues, path, "created_at")
+    _timestamp(root.get("updated_at"), issues, path, "updated_at")
+    if root.get("status") not in ALL_STATUSES:
+        _add(issues, path, "status", "unknown manifest status")
+
+    input_fields = {"mode", "source_path", "source_sha256", "request_path", "language"}
+    input_data = _object(root.get("input"), input_fields, input_fields, issues, path, "input")
+    if input_data is not None:
+        if input_data.get("mode") not in {"short_prompt", "pasted_story", "source_file", "resume"}:
+            _add(issues, path, "input.mode", "unknown input mode")
+        _relative_path(input_data.get("source_path"), issues, path, "input.source_path")
+        _relative_path(input_data.get("request_path"), issues, path, "input.request_path")
+        if input_data.get("source_path") != "source/input.txt":
+            _add(issues, path, "input.source_path", "must equal source/input.txt")
+        if input_data.get("request_path") != "source/request.json":
+            _add(issues, path, "input.request_path", "must equal source/request.json")
+        _sha256(input_data.get("source_sha256"), issues, path, "input.source_sha256")
+        _nonempty_string(input_data.get("language"), issues, path, "input.language")
+
+    setting_fields = {
+        "page_width", "page_height", "reading_direction", "page_count",
+        "panel_count", "style_anchor", "max_panel_retries",
+    }
+    settings = _object(root.get("settings"), setting_fields, setting_fields, issues, path, "settings")
+    if settings is not None:
+        exact = {"page_width": PAGE_WIDTH, "page_height": PAGE_HEIGHT, "max_panel_retries": 2}
+        for field, expected in exact.items():
+            if settings.get(field) != expected:
+                _add(issues, path, f"settings.{field}", f"must equal {expected}")
+        if settings.get("reading_direction") != "ltr":
+            _add(issues, path, "settings.reading_direction", "must equal ltr")
+        _integer(settings.get("page_count"), 1, 4, issues, path, "settings.page_count")
+        _integer(settings.get("panel_count"), 0, 12, issues, path, "settings.panel_count")
+        _nonempty_string(settings.get("style_anchor"), issues, path, "settings.style_anchor")
+
+    capability_fields = {
+        "status", "name", "supports_reference_images", "supports_dimensions", "detected_at",
+    }
+    capability = _object(root.get("capability"), capability_fields, capability_fields, issues, path, "capability")
+    if capability is not None:
+        if capability.get("status") not in {"not_checked", "available", "unavailable"}:
+            _add(issues, path, "capability.status", "unknown capability status")
+        if capability.get("name") is not None:
+            _nonempty_string(capability.get("name"), issues, path, "capability.name")
+        elif capability.get("status") == "available":
+            _add(issues, path, "capability.name", "is required when capability is available")
+        for field in ("supports_reference_images", "supports_dimensions"):
+            if not isinstance(capability.get(field), bool):
+                _add(issues, path, f"capability.{field}", "must be boolean")
+        _timestamp(capability.get("detected_at"), issues, path, "capability.detected_at", nullable=True)
+        if capability.get("status") in {"available", "unavailable"} and capability.get("detected_at") is None:
+            _add(issues, path, "capability.detected_at", "is required after capability detection")
+
+    artifacts = _object(root.get("artifacts"), {"story_plan", "character_bible", "storyboard", "qa_report", "pdf"}, set(), issues, path, "artifacts")
+    if artifacts is not None:
+        for name, descriptor in artifacts.items():
+            item = _object(descriptor, {"path", "sha256"}, {"path", "sha256"}, issues, path, f"artifacts.{name}")
+            if item is not None:
+                _relative_path(item.get("path"), issues, path, f"artifacts.{name}.path")
+                _sha256(item.get("sha256"), issues, path, f"artifacts.{name}.sha256")
+
+    version_fields = {"planning", "storyboard", "generation", "lettering", "composition", "export"}
+    versions = _object(root.get("stage_versions"), version_fields, version_fields, issues, path, "stage_versions")
+    if versions is not None:
+        for name, value in versions.items():
+            if not isinstance(value, str) or not value.isdecimal():
+                _add(issues, path, f"stage_versions.{name}", "must be a decimal version string")
+    panels = _string_list(root.get("panels"), issues, path, "panels", maximum=12)
+    if panels is not None:
+        for index, panel_id in enumerate(panels):
+            if PANEL_ID_PATTERN.fullmatch(panel_id) is None:
+                _add(issues, path, f"panels[{index}]", "must match pNN-NN")
+        if len(set(panels)) != len(panels):
+            _add(issues, path, "panels", "panel IDs must be unique")
+    _string_list(root.get("warnings"), issues, path, "warnings")
+    return _sorted(issues)
+
+
+def validate_character_bible(data: dict[str, object]) -> list[ValidationIssue]:
+    path = "plan/character-bible.json"
+    issues: list[ValidationIssue] = []
+    root = _object(data, {"schema_version", "characters"}, {"schema_version", "characters"}, issues, path, "")
+    if root is None:
+        return _sorted(issues)
+    if root.get("schema_version") != "1.0":
+        _add(issues, path, "schema_version", "must equal 1.0")
+    characters = root.get("characters")
+    if not isinstance(characters, list):
+        _add(issues, path, "characters", "must be an array")
+        return _sorted(issues)
+    ids: list[str] = []
+    character_fields = {
+        "id", "name", "role", "age_band", "pronouns", "visual_fingerprint",
+        "personality", "motivation", "speech", "reference_path",
+    }
+    fingerprint_fields = {
+        "silhouette", "face", "hair", "wardrobe", "palette",
+        "signature_props", "invariants", "avoid",
+    }
+    for index, value in enumerate(characters):
+        prefix = f"characters[{index}]"
+        character = _object(value, character_fields, character_fields, issues, path, prefix)
+        if character is None:
+            continue
+        if _identifier(character.get("id"), issues, path, f"{prefix}.id"):
+            ids.append(character["id"])
+        for field in ("name", "role", "age_band", "pronouns", "motivation", "speech"):
+            _nonempty_string(character.get(field), issues, path, f"{prefix}.{field}")
+        _string_list(character.get("personality"), issues, path, f"{prefix}.personality", minimum=1)
+        _relative_path(character.get("reference_path"), issues, path, f"{prefix}.reference_path")
+        if isinstance(character.get("id"), str) and character.get("reference_path") != f"references/characters/{character['id']}.png":
+            _add(issues, path, f"{prefix}.reference_path", "must match the character ID")
+        fingerprint = _object(
+            character.get("visual_fingerprint"), fingerprint_fields, fingerprint_fields,
+            issues, path, f"{prefix}.visual_fingerprint",
+        )
+        if fingerprint is not None:
+            for field in ("silhouette", "face", "hair", "wardrobe"):
+                _nonempty_string(fingerprint.get(field), issues, path, f"{prefix}.visual_fingerprint.{field}")
+            _string_list(fingerprint.get("palette"), issues, path, f"{prefix}.visual_fingerprint.palette", minimum=1)
+            _string_list(fingerprint.get("signature_props"), issues, path, f"{prefix}.visual_fingerprint.signature_props", minimum=1)
+            _string_list(fingerprint.get("invariants"), issues, path, f"{prefix}.visual_fingerprint.invariants", minimum=2, maximum=5)
+            _string_list(fingerprint.get("avoid"), issues, path, f"{prefix}.visual_fingerprint.avoid", minimum=1)
+    if len(set(ids)) != len(ids):
+        _add(issues, path, "characters", "character IDs must be unique")
+    return _sorted(issues)
+
+
+def validate_story_plan(data: dict[str, object]) -> list[ValidationIssue]:
+    path = "plan/story-plan.json"
+    issues: list[ValidationIssue] = []
+    fields = {
+        "schema_version", "title", "logline", "theme", "tone", "rating",
+        "setting", "beginning", "turn", "climax", "ending", "scenes",
+    }
+    root = _object(data, fields, fields, issues, path, "")
+    if root is None:
+        return _sorted(issues)
+    if root.get("schema_version") != "1.0":
+        _add(issues, path, "schema_version", "must equal 1.0")
+    for field in ("title", "logline", "theme", "setting", "beginning", "turn", "climax", "ending"):
+        _nonempty_string(root.get(field), issues, path, field)
+    _string_list(root.get("tone"), issues, path, "tone", minimum=1)
+    if root.get("rating") != "teen":
+        _add(issues, path, "rating", "must equal teen")
+    scenes = root.get("scenes")
+    if not isinstance(scenes, list):
+        _add(issues, path, "scenes", "must be an array")
+        return _sorted(issues)
+    if not 2 <= len(scenes) <= 5:
+        _add(issues, path, "scenes", "must contain 2 to 5 scenes")
+    scene_fields = {"id", "purpose", "location", "time", "characters", "continuity_anchor"}
+    ids: list[str] = []
+    for index, value in enumerate(scenes):
+        prefix = f"scenes[{index}]"
+        scene = _object(value, scene_fields, scene_fields, issues, path, prefix)
+        if scene is None:
+            continue
+        if _identifier(scene.get("id"), issues, path, f"{prefix}.id"):
+            ids.append(scene["id"])
+        for field in ("purpose", "location", "time", "continuity_anchor"):
+            _nonempty_string(scene.get(field), issues, path, f"{prefix}.{field}")
+        character_ids = _string_list(scene.get("characters"), issues, path, f"{prefix}.characters")
+        if character_ids is not None:
+            for item_index, character_id in enumerate(character_ids):
+                _identifier(character_id, issues, path, f"{prefix}.characters[{item_index}]")
+            if len(set(character_ids)) != len(character_ids):
+                _add(issues, path, f"{prefix}.characters", "character IDs must be unique")
+    if len(set(ids)) != len(ids):
+        _add(issues, path, "scenes", "scene IDs must be unique")
+    return _sorted(issues)
+
+
+def _validate_text_item(
+    value: object,
+    panel_characters: set[str],
+    known_characters: set[str],
+    issues: list[ValidationIssue],
+    path: str,
+    prefix: str,
+) -> int:
+    fields = {"id", "kind", "speaker", "content", "anchor", "tail_target", "priority"}
+    item = _object(value, fields, fields, issues, path, prefix)
+    if item is None:
+        return 0
+    _identifier(item.get("id"), issues, path, f"{prefix}.id")
+    kind = item.get("kind")
+    if kind not in {"dialogue", "caption", "sfx"}:
+        _add(issues, path, f"{prefix}.kind", "must be dialogue, caption, or sfx")
+    content = item.get("content")
+    word_count = 0
+    if _nonempty_string(content, issues, path, f"{prefix}.content"):
+        assert isinstance(content, str)
+        word_count = len(content.split())
+        limits = {"dialogue": 32, "caption": 45, "sfx": 3}
+        if kind in limits and word_count > limits[kind]:
+            _add(issues, path, f"{prefix}.content", f"exceeds {limits[kind]}-word {kind} limit")
+        if unicodedata.normalize("NFC", content) != content:
+            _add(issues, path, f"{prefix}.content", "must be Unicode NFC-normalized")
+        if any(unicodedata.category(char) == "Cc" and char != "\n" for char in content):
+            _add(issues, path, f"{prefix}.content", "contains a disallowed control character")
+    speaker = item.get("speaker")
+    if kind == "dialogue":
+        if not _identifier(speaker, issues, path, f"{prefix}.speaker"):
+            pass
+        elif speaker not in known_characters or speaker not in panel_characters:
+            _add(issues, path, f"{prefix}.speaker", "must reference a character present in the panel")
+    elif speaker is not None:
+        _add(issues, path, f"{prefix}.speaker", "must be null for caption and sfx")
+    if item.get("anchor") not in ANCHORS:
+        _add(issues, path, f"{prefix}.anchor", "unknown text anchor")
+    tail = item.get("tail_target")
+    if kind == "dialogue":
+        if (
+            not isinstance(tail, list)
+            or len(tail) != 2
+            or any(isinstance(number, bool) or not isinstance(number, (int, float)) or not 0 <= number <= 1 for number in tail)
+        ):
+            _add(issues, path, f"{prefix}.tail_target", "must be normalized [x, y] coordinates")
+    elif tail is not None:
+        _add(issues, path, f"{prefix}.tail_target", "must be null for caption and sfx")
+    _integer(item.get("priority"), 1, 1_000_000, issues, path, f"{prefix}.priority")
+    return word_count
+
+
+def validate_storyboard(
+    data: dict[str, object],
+    story: dict[str, object],
+    characters: dict[str, object],
+) -> list[ValidationIssue]:
+    path = "plan/storyboard.json"
+    issues: list[ValidationIssue] = []
+    root = _object(data, {"schema_version", "pages"}, {"schema_version", "pages"}, issues, path, "")
+    if root is None:
+        return _sorted(issues)
+    if root.get("schema_version") != "1.0":
+        _add(issues, path, "schema_version", "must equal 1.0")
+    pages = root.get("pages")
+    if not isinstance(pages, list):
+        _add(issues, path, "pages", "must be an array")
+        return _sorted(issues)
+    if not 1 <= len(pages) <= 4:
+        _add(issues, path, "pages", "must contain 1 to 4 pages")
+
+    known_scenes = {
+        scene.get("id") for scene in story.get("scenes", [])
+        if isinstance(scene, dict) and isinstance(scene.get("id"), str)
+    }
+    scene_anchors = {
+        scene.get("id"): scene.get("continuity_anchor", "").strip()
+        for scene in story.get("scenes", [])
+        if isinstance(scene, dict)
+        and isinstance(scene.get("id"), str)
+        and isinstance(scene.get("continuity_anchor"), str)
+    }
+    known_characters = {
+        character.get("id") for character in characters.get("characters", [])
+        if isinstance(character, dict) and isinstance(character.get("id"), str)
+    }
+    character_invariants = {
+        character.get("id"): set(character.get("visual_fingerprint", {}).get("invariants", []))
+        for character in characters.get("characters", [])
+        if isinstance(character, dict)
+        and isinstance(character.get("id"), str)
+        and isinstance(character.get("visual_fingerprint"), dict)
+    }
+    page_fields = {"number", "layout", "panels"}
+    panel_fields = {
+        "id", "order", "scene_id", "rect", "beat", "characters", "shot",
+        "composition", "action", "expression", "lighting", "continuity",
+        "negative", "text",
+    }
+    all_panel_ids: list[str] = []
+    all_text_ids: list[str] = []
+    total_panels = 0
+    for page_index, value in enumerate(pages):
+        page_prefix = f"pages[{page_index}]"
+        page = _object(value, page_fields, page_fields, issues, path, page_prefix)
+        if page is None:
+            continue
+        page_number = page.get("number")
+        _integer(page_number, 1, 4, issues, path, f"{page_prefix}.number")
+        if page_number != page_index + 1:
+            _add(issues, path, f"{page_prefix}.number", "pages must be numbered contiguously from 1")
+        layout = page.get("layout")
+        if layout not in LAYOUTS:
+            _add(issues, path, f"{page_prefix}.layout", "unknown layout")
+        panels = page.get("panels")
+        if not isinstance(panels, list):
+            _add(issues, path, f"{page_prefix}.panels", "must be an array")
+            continue
+        total_panels += len(panels)
+        if not 1 <= len(panels) <= 4:
+            _add(issues, path, f"{page_prefix}.panels", "must contain 1 to 4 panels")
+        expected_rects = layout_rects(layout) if layout in LAYOUTS else []
+        if expected_rects and len(panels) != len(expected_rects):
+            _add(issues, path, f"{page_prefix}.panels", "panel count must match the fixed layout")
+        page_rectangles: list[tuple[str, dict[str, int]]] = []
+        for panel_index, panel_value in enumerate(panels):
+            prefix = f"{page_prefix}.panels[{panel_index}]"
+            panel = _object(panel_value, panel_fields, panel_fields, issues, path, prefix)
+            if panel is None:
+                continue
+            panel_id = panel.get("id")
+            if not isinstance(panel_id, str) or PANEL_ID_PATTERN.fullmatch(panel_id) is None:
+                _add(issues, path, f"{prefix}.id", "must match pNN-NN")
+            else:
+                all_panel_ids.append(panel_id)
+                expected_id = f"p{page_index + 1:02d}-{panel_index + 1:02d}"
+                if panel_id != expected_id:
+                    _add(issues, path, f"{prefix}.id", f"must equal {expected_id}")
+            if panel.get("order") != panel_index + 1:
+                _add(issues, path, f"{prefix}.order", "must match reading order")
+            if panel.get("scene_id") not in known_scenes:
+                _add(issues, path, f"{prefix}.scene_id", "must reference a story scene")
+            for field in ("beat", "shot", "composition", "action", "expression", "lighting"):
+                _nonempty_string(panel.get(field), issues, path, f"{prefix}.{field}")
+            panel_characters = _string_list(panel.get("characters"), issues, path, f"{prefix}.characters") or []
+            for item_index, character_id in enumerate(panel_characters):
+                if character_id not in known_characters:
+                    _add(issues, path, f"{prefix}.characters[{item_index}]", "must reference the character bible")
+            if len(set(panel_characters)) != len(panel_characters):
+                _add(issues, path, f"{prefix}.characters", "character IDs must be unique")
+            continuity = _string_list(panel.get("continuity"), issues, path, f"{prefix}.continuity") or []
+            if len(set(continuity)) != len(continuity):
+                _add(issues, path, f"{prefix}.continuity", "continuity anchors must be unique")
+            for continuity_index, anchor in enumerate(continuity):
+                anchor_field = f"{prefix}.continuity[{continuity_index}]"
+                owner, separator, fact = anchor.partition(":")
+                if not separator or not fact.strip() or owner not in known_characters | known_scenes:
+                    _add(issues, path, anchor_field, "must reference a known character or scene anchor")
+                elif owner in character_invariants and fact.strip() not in character_invariants[owner]:
+                    _add(issues, path, anchor_field, "must reuse an exact character invariant")
+                elif owner in scene_anchors and fact.strip() != scene_anchors[owner]:
+                    _add(issues, path, anchor_field, "must reuse the exact scene continuity anchor")
+            _string_list(panel.get("negative"), issues, path, f"{prefix}.negative", minimum=1)
+            rect = _object(panel.get("rect"), {"x", "y", "width", "height"}, {"x", "y", "width", "height"}, issues, path, f"{prefix}.rect")
+            valid_rect: dict[str, int] | None = None
+            if rect is not None and all(isinstance(rect.get(key), int) and not isinstance(rect.get(key), bool) for key in ("x", "y", "width", "height")):
+                valid_rect = {key: int(rect[key]) for key in ("x", "y", "width", "height")}
+                if (
+                    valid_rect["width"] <= 0 or valid_rect["height"] <= 0
+                    or valid_rect["x"] < MARGIN or valid_rect["y"] < MARGIN
+                    or valid_rect["x"] + valid_rect["width"] > PAGE_WIDTH - MARGIN
+                    or valid_rect["y"] + valid_rect["height"] > PAGE_HEIGHT - MARGIN
+                ):
+                    _add(issues, path, f"{prefix}.rect", "must stay inside the page margin with positive area")
+                if panel_index < len(expected_rects) and valid_rect != expected_rects[panel_index]:
+                    _add(issues, path, f"{prefix}.rect", "must equal the fixed layout rectangle")
+                page_rectangles.append((prefix, valid_rect))
+            elif rect is not None:
+                _add(issues, path, f"{prefix}.rect", "rectangle values must be integers")
+            text_items = panel.get("text")
+            if not isinstance(text_items, list):
+                _add(issues, path, f"{prefix}.text", "must be an array")
+            else:
+                if len(text_items) > 3:
+                    _add(issues, path, f"{prefix}.text", "must contain 0 to 3 text items")
+                total_words = 0
+                for text_index, text_value in enumerate(text_items):
+                    text_prefix = f"{prefix}.text[{text_index}]"
+                    total_words += _validate_text_item(
+                        text_value, set(panel_characters), known_characters,
+                        issues, path, text_prefix,
+                    )
+                    if isinstance(text_value, dict) and isinstance(text_value.get("id"), str):
+                        all_text_ids.append(text_value["id"])
+                if total_words > 45:
+                    _add(issues, path, f"{prefix}.text", "panel text exceeds 45 total words")
+        for first_index, (first_prefix, first) in enumerate(page_rectangles):
+            for second_prefix, second in page_rectangles[first_index + 1:]:
+                if rectangles_overlap(first, second):
+                    _add(issues, path, f"{first_prefix}.rect", f"overlaps {second_prefix}.rect")
+    if total_panels > 12:
+        _add(issues, path, "pages.panels", "project must contain at most 12 panels")
+    if len(set(all_panel_ids)) != len(all_panel_ids):
+        _add(issues, path, "pages.panels", "panel IDs must be unique")
+    if len(set(all_text_ids)) != len(all_text_ids):
+        _add(issues, path, "pages.panels.text", "text IDs must be unique")
+    return _sorted(issues)
+
+
+def validate_panel_record(data: dict[str, object]) -> list[ValidationIssue]:
+    panel_name = data.get("panel_id") if isinstance(data, dict) else "unknown"
+    path = f"qa/panels/{panel_name}.json"
+    issues: list[ValidationIssue] = []
+    fields = {
+        "schema_version", "panel_id", "source_prompt_path", "raw_path", "clean_path",
+        "raw_sha256", "dimensions", "attempts", "generation", "checks",
+        "decision", "retry_reason", "unresolved_warnings",
+    }
+    root = _object(data, fields, fields, issues, path, "")
+    if root is None:
+        return _sorted(issues)
+    if root.get("schema_version") != "1.0":
+        _add(issues, path, "schema_version", "must equal 1.0")
+    if not isinstance(root.get("panel_id"), str) or PANEL_ID_PATTERN.fullmatch(root["panel_id"]) is None:
+        _add(issues, path, "panel_id", "must match pNN-NN")
+    for field in ("source_prompt_path", "raw_path", "clean_path"):
+        _relative_path(root.get(field), issues, path, field, nullable=True)
+    _sha256(root.get("raw_sha256"), issues, path, "raw_sha256", nullable=True)
+    dimensions = _object(root.get("dimensions"), {"width", "height"}, {"width", "height"}, issues, path, "dimensions")
+    if dimensions is not None:
+        _integer(dimensions.get("width"), 0, 100_000, issues, path, "dimensions.width")
+        _integer(dimensions.get("height"), 0, 100_000, issues, path, "dimensions.height")
+    _integer(root.get("attempts"), 0, 3, issues, path, "attempts")
+    generation_fields = {"capability_name", "reference_paths", "completed_at"}
+    generation = _object(root.get("generation"), generation_fields, generation_fields, issues, path, "generation")
+    if generation is not None:
+        if generation.get("capability_name") is not None:
+            _nonempty_string(generation.get("capability_name"), issues, path, "generation.capability_name")
+        references = generation.get("reference_paths")
+        if not isinstance(references, list):
+            _add(issues, path, "generation.reference_paths", "must be an array")
+        else:
+            for index, reference in enumerate(references):
+                _relative_path(reference, issues, path, f"generation.reference_paths[{index}]")
+        _timestamp(generation.get("completed_at"), issues, path, "generation.completed_at", nullable=True)
+    checks = root.get("checks")
+    if not isinstance(checks, list):
+        _add(issues, path, "checks", "must be an array")
+    else:
+        actual_ids = [check.get("id") if isinstance(check, dict) else None for check in checks]
+        if tuple(actual_ids) != CHECK_IDS:
+            _add(issues, path, "checks", "must contain the seven required checks in normative order")
+        check_fields = {"id", "result", "severity", "evidence"}
+        for index, value in enumerate(checks):
+            prefix = f"checks[{index}]"
+            check = _object(value, check_fields, check_fields, issues, path, prefix)
+            if check is None:
+                continue
+            if check.get("result") not in {"pass", "fail", "warning"}:
+                _add(issues, path, f"{prefix}.result", "unknown check result")
+            if check.get("severity") not in {"error", "warning"}:
+                _add(issues, path, f"{prefix}.severity", "unknown check severity")
+            _nonempty_string(check.get("evidence"), issues, path, f"{prefix}.evidence")
+    decision = root.get("decision")
+    if decision not in {"accept", "regenerate", "accept_with_warnings"}:
+        _add(issues, path, "decision", "unknown panel decision")
+    has_error_failure = isinstance(checks, list) and any(
+        isinstance(check, dict)
+        and check.get("result") == "fail"
+        and check.get("severity") == "error"
+        for check in checks
+    )
+    if has_error_failure and decision != "regenerate":
+        _add(issues, path, "decision", "error-level failed checks require regeneration")
+    has_warning = isinstance(checks, list) and any(
+        isinstance(check, dict)
+        and (
+            check.get("result") == "warning"
+            or (check.get("result") == "fail" and check.get("severity") == "warning")
+        )
+        for check in checks
+    )
+    if has_warning and decision not in {"accept_with_warnings", "regenerate"}:
+        _add(issues, path, "decision", "warning checks require accept_with_warnings or regeneration")
+    retry_reason = root.get("retry_reason")
+    if decision == "regenerate":
+        _nonempty_string(retry_reason, issues, path, "retry_reason")
+    elif retry_reason is not None:
+        _add(issues, path, "retry_reason", "must be null unless regenerating")
+    unresolved = _string_list(root.get("unresolved_warnings"), issues, path, "unresolved_warnings")
+    if decision == "accept_with_warnings" and (not has_warning or not unresolved):
+        _add(issues, path, "unresolved_warnings", "accepted warnings require check evidence and user-visible impact")
+    attempts = root.get("attempts")
+    if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > 0:
+        for field in ("source_prompt_path", "raw_path", "clean_path"):
+            if root.get(field) is None:
+                _add(issues, path, field, "is required after generation")
+        if root.get("raw_sha256") is None:
+            _add(issues, path, "raw_sha256", "is required after generation")
+        if isinstance(dimensions, dict):
+            if not isinstance(dimensions.get("width"), int) or dimensions.get("width", 0) <= 0:
+                _add(issues, path, "dimensions.width", "must be positive after generation")
+            if not isinstance(dimensions.get("height"), int) or dimensions.get("height", 0) <= 0:
+                _add(issues, path, "dimensions.height", "must be positive after generation")
+        if isinstance(generation, dict):
+            if generation.get("capability_name") is None:
+                _add(issues, path, "generation.capability_name", "is required after generation")
+            if generation.get("completed_at") is None:
+                _add(issues, path, "generation.completed_at", "is required after generation")
+    if decision in {"accept", "accept_with_warnings"} and attempts == 0:
+        _add(issues, path, "attempts", "accepted panels require a generation attempt")
+    return _sorted(issues)
+
+
+def _contained_project_path(project_dir: Path, relative_path: str) -> Path:
+    root = project_dir.resolve()
+    candidate = (root / relative_path).resolve(strict=False)
+    if not candidate.is_relative_to(root):
+        raise ValueError(f"path escapes the project boundary: {relative_path}")
+    return candidate
+
+
+def _read_canonical_json(
+    project_dir: Path,
+    relative_path: str,
+    issues: list[ValidationIssue],
+) -> dict[str, object] | None:
+    try:
+        path = _contained_project_path(project_dir, relative_path)
+    except ValueError as error:
+        _add(issues, relative_path, "file", str(error))
+        return None
+    if not path.is_file():
+        _add(issues, relative_path, "file", "required file is missing")
+        return None
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        _add(issues, relative_path, "file", f"cannot read JSON: {type(error).__name__}: {error}")
+        return None
+    canonical = (json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if raw != canonical:
+        _add(issues, relative_path, "file", "JSON must use canonical two-space sorted UTF-8 formatting")
+    return data
+
+
+def _load_artifact(
+    project_dir: Path,
+    relative_path: str,
+    validator: Callable[[dict[str, object]], list[ValidationIssue]],
+    issues: list[ValidationIssue],
+) -> dict[str, object] | None:
+    data = _read_canonical_json(project_dir, relative_path, issues)
+    if data is None:
+        return None
+    issues.extend(validator(data))
+    return data
+
+
+def _validate_raster(
+    project_dir: Path,
+    relative_path: object,
+    issue_path: str,
+    field: str,
+    issues: list[ValidationIssue],
+    expected_ratio: float | None = None,
+) -> tuple[int, int] | None:
+    local_issues: list[ValidationIssue] = []
+    if not _relative_path(relative_path, local_issues, issue_path, field):
+        issues.extend(local_issues)
+        return None
+    assert isinstance(relative_path, str)
+    try:
+        image_path = _contained_project_path(project_dir, relative_path)
+    except ValueError:
+        _add(issues, issue_path, field, "referenced image path escapes the project boundary")
+        return None
+    if image_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        _add(issues, issue_path, field, "must be PNG, JPEG, or WebP")
+        return None
+    if not image_path.is_file():
+        _add(issues, issue_path, field, "referenced image is missing")
+        return None
+    try:
+        with Image.open(image_path) as image:
+            if image.format not in {"PNG", "JPEG", "WEBP"}:
+                _add(issues, issue_path, field, "must contain PNG, JPEG, or WebP data")
+            width, height = image.size
+            if width < 512 or height < 512:
+                _add(issues, issue_path, field, "image dimensions must both be at least 512px")
+            if "A" in image.mode or "transparency" in image.info:
+                _add(issues, issue_path, field, "image has unintended alpha transparency")
+            if expected_ratio is not None and height > 0:
+                actual_ratio = width / height
+                if abs(actual_ratio - expected_ratio) / expected_ratio > 0.02:
+                    _add(issues, issue_path, field, "image aspect ratio differs from storyboard by more than 2%")
+            image.verify()
+            return width, height
+    except (OSError, UnidentifiedImageError) as error:
+        _add(issues, issue_path, field, f"image is unreadable: {type(error).__name__}")
+        return None
+
+
+def _storyboard_panel_map(storyboard: dict[str, object]) -> dict[str, dict[str, object]]:
+    result: dict[str, dict[str, object]] = {}
+    for page in storyboard.get("pages", []):
+        if not isinstance(page, dict):
+            continue
+        for panel in page.get("panels", []):
+            if isinstance(panel, dict) and isinstance(panel.get("id"), str):
+                result[panel["id"]] = panel
+    return result
+
+
+def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIssue]:
+    project_dir = Path(project_dir)
+    if stage not in STAGES:
+        raise ValueError(f"unknown validation stage: {stage}")
+    if not project_dir.is_dir():
+        raise FileNotFoundError(f"project directory does not exist: {project_dir}")
+
+    issues: list[ValidationIssue] = []
+    manifest = _load_artifact(project_dir, "project.json", validate_manifest, issues)
+    needs_plan = stage in {"all", "plan", "storyboard", "panels", "final"}
+    needs_storyboard = stage in {"all", "storyboard", "panels", "final"}
+    needs_panels = stage in {"all", "panels", "final"}
+    story = None
+    characters = None
+    storyboard = None
+    if needs_plan:
+        story = _load_artifact(project_dir, "plan/story-plan.json", validate_story_plan, issues)
+        characters = _load_artifact(
+            project_dir, "plan/character-bible.json", validate_character_bible, issues
+        )
+        if story is not None and characters is not None:
+            known = {
+                character.get("id") for character in characters.get("characters", [])
+                if isinstance(character, dict)
+            }
+            for scene_index, scene in enumerate(story.get("scenes", [])):
+                if not isinstance(scene, dict):
+                    continue
+                for character_index, character_id in enumerate(scene.get("characters", [])):
+                    if character_id not in known:
+                        _add(
+                            issues,
+                            "plan/story-plan.json",
+                            f"scenes[{scene_index}].characters[{character_index}]",
+                            "must reference the character bible",
+                        )
+    if needs_storyboard:
+        storyboard = _read_canonical_json(project_dir, "plan/storyboard.json", issues)
+        if storyboard is not None and story is not None and characters is not None:
+            issues.extend(validate_storyboard(storyboard, story, characters))
+        if storyboard is not None and manifest is not None:
+            pages = storyboard.get("pages")
+            settings = manifest.get("settings")
+            if isinstance(pages, list) and isinstance(settings, dict):
+                actual_pages = len(pages)
+                actual_panels = sum(
+                    len(page.get("panels", []))
+                    for page in pages
+                    if isinstance(page, dict) and isinstance(page.get("panels"), list)
+                )
+                if settings.get("page_count") != actual_pages:
+                    _add(issues, "project.json", "settings.page_count", "must match the storyboard page count")
+                if settings.get("panel_count") != actual_panels:
+                    _add(issues, "project.json", "settings.panel_count", "must match the storyboard panel count")
+            panel_map = _storyboard_panel_map(storyboard)
+            manifest_panels = manifest.get("panels", [])
+            if isinstance(manifest_panels, list) and manifest_panels != list(panel_map):
+                _add(issues, "project.json", "panels", "must match storyboard panel order")
+
+    if needs_panels and storyboard is not None:
+        panel_map = _storyboard_panel_map(storyboard)
+        for panel_id, panel in panel_map.items():
+            record_relative = f"qa/panels/{panel_id}.json"
+            record = _read_canonical_json(project_dir, record_relative, issues)
+            if record is None:
+                continue
+            issues.extend(validate_panel_record(record))
+            if record.get("panel_id") != panel_id:
+                _add(issues, record_relative, "panel_id", "must match its storyboard panel")
+            rect = panel.get("rect")
+            expected_ratio = None
+            if isinstance(rect, dict) and isinstance(rect.get("width"), int) and isinstance(rect.get("height"), int) and rect["height"] > 0:
+                expected_ratio = rect["width"] / rect["height"]
+            raw_size = _validate_raster(
+                project_dir, record.get("raw_path"), record_relative, "raw_path",
+                issues, expected_ratio,
+            )
+            _validate_raster(
+                project_dir, record.get("clean_path"), record_relative, "clean_path",
+                issues, expected_ratio,
+            )
+            if raw_size is not None:
+                dimensions = record.get("dimensions")
+                if isinstance(dimensions, dict) and (
+                    dimensions.get("width"), dimensions.get("height")
+                ) != raw_size:
+                    _add(issues, record_relative, "dimensions", "must match the raw image")
+            raw_path = record.get("raw_path")
+            raw_hash = record.get("raw_sha256")
+            if isinstance(raw_path, str) and isinstance(raw_hash, str):
+                try:
+                    image_path = _contained_project_path(project_dir, raw_path)
+                except ValueError:
+                    pass
+                else:
+                    if image_path.is_file() and SHA256_PATTERN.fullmatch(raw_hash) and sha256_file(image_path) != raw_hash:
+                        _add(issues, record_relative, "raw_sha256", "hash does not match the raw image")
+            prompt_path = record.get("source_prompt_path")
+            if isinstance(prompt_path, str):
+                try:
+                    prompt_file = _contained_project_path(project_dir, prompt_path)
+                except ValueError:
+                    _add(issues, record_relative, "source_prompt_path", "referenced prompt path escapes the project boundary")
+                else:
+                    if not prompt_file.is_file():
+                        _add(issues, record_relative, "source_prompt_path", "referenced prompt is missing")
+            generation = record.get("generation")
+            if isinstance(generation, dict):
+                for reference_index, reference_path in enumerate(generation.get("reference_paths", [])):
+                    _validate_raster(
+                        project_dir,
+                        reference_path,
+                        record_relative,
+                        f"generation.reference_paths[{reference_index}]",
+                        issues,
+                    )
+        if manifest is not None:
+            source_path = manifest.get("input", {}).get("source_path") if isinstance(manifest.get("input"), dict) else None
+            source_hash = manifest.get("input", {}).get("source_sha256") if isinstance(manifest.get("input"), dict) else None
+            if isinstance(source_path, str) and isinstance(source_hash, str):
+                try:
+                    source_file = _contained_project_path(project_dir, source_path)
+                except ValueError:
+                    _add(issues, "project.json", "input.source_path", "referenced source path escapes the project boundary")
+                else:
+                    if not source_file.is_file():
+                        _add(issues, "project.json", "input.source_path", "referenced source is missing")
+                    elif SHA256_PATTERN.fullmatch(source_hash) and sha256_file(source_file) != source_hash:
+                        _add(issues, "project.json", "input.source_sha256", "hash does not match the source")
+
+    if stage in {"all", "final"} and manifest is not None:
+        artifacts = manifest.get("artifacts")
+        if isinstance(artifacts, dict):
+            for name, descriptor in artifacts.items():
+                if not isinstance(descriptor, dict):
+                    continue
+                relative_path = descriptor.get("path")
+                expected_hash = descriptor.get("sha256")
+                if isinstance(relative_path, str) and isinstance(expected_hash, str):
+                    try:
+                        artifact = _contained_project_path(project_dir, relative_path)
+                    except ValueError:
+                        _add(issues, "project.json", f"artifacts.{name}.path", "referenced artifact path escapes the project boundary")
+                    else:
+                        if not artifact.is_file():
+                            _add(issues, "project.json", f"artifacts.{name}.path", "referenced artifact is missing")
+                        elif SHA256_PATTERN.fullmatch(expected_hash) and sha256_file(artifact) != expected_hash:
+                            _add(issues, "project.json", f"artifacts.{name}.sha256", "hash does not match the artifact")
+    return _sorted(issues)
+
+
+class _ValidationArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ValueError(f"invalid invocation: {message}")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = _ValidationArgumentParser(prog="validate_project.py")
+    parser.add_argument("project_dir", type=Path)
+    parser.add_argument("--stage", choices=STAGES, default="all")
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        parser = _build_parser()
+        arguments = parser.parse_args(argv)
+        issues = validate_project(arguments.project_dir, arguments.stage)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"ERROR {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    if issues:
+        if arguments.as_json:
+            print(json.dumps(
+                {"issues": [
+                    {"path": issue.path, "field": issue.field, "message": issue.message}
+                    for issue in issues
+                ]},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ))
+        else:
+            for issue in issues:
+                print(f"{issue.path}:{issue.field}: {issue.message}")
+        return 2
+    if arguments.as_json:
+        print(json.dumps({"issues": []}, indent=2, sort_keys=True))
+    else:
+        print(f"VALID {arguments.project_dir} ({arguments.stage})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

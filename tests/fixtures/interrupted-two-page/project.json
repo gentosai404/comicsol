@@ -1,0 +1,58 @@
+{
+  "artifacts": {
+    "character_bible": {
+      "path": "plan/character-bible.json",
+      "sha256": "1b96b90764980398be0e68e96cf96acc3f2a2e4d7f7c50c26e8a128125dfce82"
+    },
+    "story_plan": {
+      "path": "plan/story-plan.json",
+      "sha256": "a9cf7ac3793c658a243126ffa34f14347d2c04bfbf57774691d7a5c9683c4296"
+    },
+    "storyboard": {
+      "path": "plan/storyboard.json",
+      "sha256": "0abdf3923b7bdcd7eb7b335037408c3f8509ded3db97bff6cb659c3ad47ab328"
+    }
+  },
+  "capability": {
+    "detected_at": "2026-07-18T06:05:00Z",
+    "name": "offline-synthetic-fixture",
+    "status": "available",
+    "supports_dimensions": true,
+    "supports_reference_images": true
+  },
+  "created_at": "2026-07-18T06:00:00Z",
+  "input": {
+    "language": "en",
+    "mode": "source_file",
+    "request_path": "source/request.json",
+    "source_path": "source/input.txt",
+    "source_sha256": "a82f277e900899aa9265acfa849960647ba1f8008227e63906fdab3ce3027950"
+  },
+  "panels": [
+    "p01-01",
+    "p01-02"
+  ],
+  "project_id": "interrupted-two-page",
+  "schema_version": "1.0",
+  "settings": {
+    "max_panel_retries": 2,
+    "page_count": 2,
+    "page_height": 2400,
+    "page_width": 1600,
+    "panel_count": 2,
+    "reading_direction": "ltr",
+    "style_anchor": "original high-contrast manga/anime; expressive ink-like linework; restrained color accents"
+  },
+  "stage_versions": {
+    "composition": "1",
+    "export": "1",
+    "generation": "1",
+    "lettering": "1",
+    "planning": "1",
+    "storyboard": "1"
+  },
+  "status": "BLOCKED",
+  "title": "Interrupted Lantern",
+  "updated_at": "2026-07-18T06:30:00Z",
+  "warnings": []
+}

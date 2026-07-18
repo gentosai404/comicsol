@@ -1,0 +1,4 @@
+{"details":{"from":"QA_READY","to":"LETTERED","warning_present":false},"event":"project.transitioned","timestamp":"2026-07-18T08:01:08Z"}
+{"details":{"from":"LETTERED","to":"COMPOSED","warning_present":false},"event":"project.transitioned","timestamp":"2026-07-18T08:01:16Z"}
+{"details":{"from":"COMPOSED","to":"EXPORTED","warning_present":false},"event":"project.transitioned","timestamp":"2026-07-18T08:01:17Z"}
+{"details":{"from":"EXPORTED","to":"COMPLETE","warning_present":false},"event":"project.transitioned","timestamp":"2026-07-18T08:01:18Z"}

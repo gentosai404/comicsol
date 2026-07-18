@@ -1,3 +1,209 @@
 # Comic Sol
 
-Codex-native skill for end-to-end manga creation.
+Comic Sol is a pure installable Codex Skill that turns a short prompt, pasted story,
+or `.txt`/`.md` file into an original manga/anime comic. One natural-language
+invocation drives planning, character consistency, image generation, visual QA,
+selective repair, deterministic lettering and composition, and PDF export. It is
+not a web app or hosted product. No build service is required.
+
+## Install
+
+Requirements are Python 3.11 and `Pillow==11.3.0`. Image creation additionally
+requires an image-generation capability exposed to the active agent session; Comic
+Sol never embeds provider credentials.
+
+Clone the public repository, install the one pinned dependency, then either use the
+checkout directly or copy it into your Codex skills directory:
+
+```bash
+git clone https://github.com/wenn-id/comic-sol.git
+cd comic-sol
+python3.11 -m pip install Pillow==11.3.0
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
+cp -R . "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol/"
+```
+
+The host-agnostic rule is: copy this repository as one `comic-sol` folder beneath
+the Codex skills directory configured by your Codex installation. Keep `SKILL.md`,
+`scripts/`, `references/`, `templates/`, and `assets/` together.
+
+Windows PowerShell:
+
+```powershell
+py -3.11 -m pip install Pillow==11.3.0
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills\comic-sol"
+Copy-Item -Recurse -Force .\* "$env:USERPROFILE\.codex\skills\comic-sol"
+```
+
+Supported environments are Linux, macOS, Windows, and WSL with Python 3.11 and
+Pillow 11.3.0. The deterministic test suite does not need an image provider.
+
+## Invoke
+
+Open Codex with the skill installed and say, for example:
+
+> Make a 2-page manga about a courier delivering sunlight to an underground city.
+
+That is the complete user invocation. Comic Sol detects prompt, pasted-story,
+source-file, or resume mode; applies documented defaults; and asks only materially
+missing questions. It reports an explicit error if the agent session cannot return
+a local raster image. See
+[`references/capability-detection.md`](references/capability-detection.md) for the
+exact capability check and preserved-project recovery procedure.
+
+For deterministic diagnostics:
+
+```bash
+python3.11 scripts/comic_sol.py doctor --output-root /tmp/comic-sol-doctor
+```
+
+## Inspect the result
+
+Each run preserves editable semantic and visual intermediates beneath its generated
+project directory. The important outputs are:
+
+```text
+project.json                  project manifest and current state
+plan/                         story plan, character bible, and storyboard
+prompts/                      editable reference and panel prompts
+references/                   canonical character and scene images
+panels/raw/                   generated panel PNGs
+panels/clean/                 accepted clean panel PNGs
+panels/*/lettered.png         deterministic lettered panel PNGs
+pages/page-001.png            ordered 1600×2400 page PNGs
+exports/<project-id>.pdf      ordered comic PDF
+qa/panels/*.json              seven-check panel QA records
+qa/report.md                  human-readable QA report
+logs/                         sanitized events, cache, and retry accounting
+```
+
+The committed [one-page synthetic fixture](tests/fixtures/valid-one-page) provides
+sample-output inspection without an external provider. Its three geometric panel
+PNGs are deterministic test data, not generated art or a claimed live sample.
+
+## Architecture
+
+`SKILL.md` orchestrates ten agent stages and progressively loads guidance from
+`references/`. Agent reasoning creates the editable story, character, storyboard,
+prompt, and QA decisions. Python scripts handle only deterministic project state,
+validation, resume planning, lettering, page composition, PDF export, and report
+rendering. Provider access remains in the agent capability plane; secrets and
+provider SDKs do not enter deterministic scripts.
+
+## Test
+
+Run the complete offline suite:
+
+```bash
+python3.11 -m unittest discover -s tests -v
+python3.11 scripts/comic_sol.py doctor
+```
+
+Clean-room Linux/macOS/WSL check:
+
+```bash
+tmp_dir=$(mktemp -d)
+python3.11 -m venv "$tmp_dir/venv"
+"$tmp_dir/venv/bin/python" -m pip install Pillow==11.3.0
+"$tmp_dir/venv/bin/python" scripts/comic_sol.py doctor --output-root "$tmp_dir/output"
+```
+
+Windows clean-room equivalent:
+
+```powershell
+$TempRoot = Join-Path $env:TEMP "comic-sol-clean-room"
+py -3.11 -m venv "$TempRoot\venv"
+& "$TempRoot\venv\Scripts\python.exe" -m pip install Pillow==11.3.0
+& "$TempRoot\venv\Scripts\python.exe" scripts\comic_sol.py doctor --output-root "$TempRoot\output"
+```
+
+## Support matrix
+
+| Area | Supported | Notes |
+|---|---|---|
+| Inputs | Short prompt, pasted prose, UTF-8 `.txt` and `.md`, resume | Source limit and defaults are documented in the workflow reference. |
+| Output | Panel PNGs, page PNGs, comic PDF, manifest, QA report | Editable intermediate artifacts remain local. |
+| Lettering | Bundled Noto Sans; Latin, Greek, Cyrillic | Font license and digest are in `assets/README.md`. |
+| Image generation | Agent-exposed tool returning a local raster | Reference images and exact dimensions are used only when supported. |
+| Deterministic scripts | Python 3.11 and Pillow 11.3.0 | Offline and provider-neutral. |
+
+## Privacy, IP, and Limitations
+
+Project artifacts stay in the selected local output directory. Prompts and reference
+images sent to a selected image tool are governed by its external provider policies.
+Minimize private source material and never place secrets in story text or
+prompts. Logs contain sanitized paths, hashes, categories, and state changes rather
+than raw credentials or story content.
+
+Comic Sol requests original manga/anime direction and translates disallowed artist
+or franchise imitation into high-level visual traits. It does not promise perfect
+character continuity: results depend on the available image capability, especially
+its reference-image and dimension support. The bundled font does not cover CJK.
+Offline fixtures prove deterministic stages, not live image quality. Large projects
+beyond four pages or twelve panels require an explicit scope decision.
+
+For support, run `doctor`, retain the printed project path, and inspect
+`project.json` plus `qa/report.md`. A `BLOCKED` project is intentionally resumable;
+restore the missing capability or correct the reported artifact, then ask Codex to
+resume that Comic Sol project.
+
+## Under-three-minute demo
+
+The judging demo is designed to finish under three minutes:
+
+1. Show the installed `comic-sol` skill and issue one natural-language request.
+2. Open the character bible, storyboard, one prompt, and seven-check panel QA.
+3. Show selective resume/repair, then the lettered panel and composed page PNGs.
+4. Open the comic PDF and `qa/report.md`; finish on the manifest status and paths.
+
+The following T12 evidence records the reviewed live run; no unreviewed variants or
+provider response payloads are included.
+
+### Verified live acceptance — July 18, 2026
+
+The accepted [`samples/sunlight-courier`](samples/sunlight-courier) project was
+created from the one-shot prompt shown above in a ChatGPT-authenticated Codex
+session using built-in `gpt-image-2` generation. It contains one canonical character
+reference, four reviewed panels, two composed pages, a two-page PDF, editable plans
+and prompts, seven-check QA records, the manifest, resume cache, and QA report. All
+four panels passed on their first generation attempt, so the run used 0 retries and
+finished `COMPLETE`.
+
+A second live run used the exact bytes of `tests/fixtures/demo-story.md`, produced
+four panels and two pages with 0 retries, validated at the final stage, and finished
+`COMPLETE`. It remains local because the committed courier sample is the concise
+judge artifact.
+
+The unavailable-capability rehearsal stopped after editable planning and
+storyboarding, wrote zero panel files, set `BLOCKED`, and emitted the exact preserved-
+project recovery error. Resuming reused the four reviewed courier panels and
+completed. A second resume returned 10 `reuse` actions and preserved the hashes and
+nanosecond mtimes of all 33 files exactly.
+
+The stopwatch demo rehearsal completed in **2:38.05**, below the three-minute
+limit. The real feedback Session ID for this Codex run is
+`019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.
+
+## Build Week evidence and pre-submission checklist
+
+Comic Sol was built with Codex and GPT-5.6 Sol for OpenAI Build Week 2026. Codex
+collaboration produced the design specification, implementation plan, TDD tests,
+deterministic scripts, portable agent workflow, and documentation. The committed
+history is the evidence trail; live acceptance evidence remains reserved for T12.
+
+Before submission:
+
+- Confirm all submitted work was created after the July 13, 2026 cutoff.
+- Make this a public repository and verify its clone/install flow while logged out.
+- Run the full suite and clean-room doctor on Linux or WSL and Windows.
+- Rehearse the demo and confirm its elapsed time is under three minutes.
+- Run `/feedback` in the final Codex session, verify the recorded real Session ID
+  resolves, and copy it into the submission materials.
+- Confirm the repository contains installation, invocation, testing, support,
+  privacy/IP, license, and limitation information but no private prompts or secrets.
+
+## License
+
+Comic Sol's original code and documentation are available under the MIT License in
+[`LICENSE`](LICENSE). The bundled Noto Sans font remains separately licensed under
+the SIL Open Font License 1.1; see [`assets/README.md`](assets/README.md).

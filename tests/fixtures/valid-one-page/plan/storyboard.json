@@ -1,0 +1,131 @@
+{
+  "pages": [
+    {
+      "layout": "hero-top-two-bottom",
+      "number": 1,
+      "panels": [
+        {
+          "action": "The last light leaves dispatch.",
+          "beat": "The last light leaves dispatch.",
+          "characters": [
+            "mira"
+          ],
+          "composition": "Mira framed on a clear third with protected text space",
+          "continuity": [
+            "mira:amber scarf"
+          ],
+          "expression": "focused determination",
+          "id": "p01-01",
+          "lighting": "amber rim light against cool shadows",
+          "negative": [
+            "text",
+            "speech bubbles",
+            "watermark"
+          ],
+          "order": 1,
+          "rect": {
+            "height": 1176,
+            "width": 1472,
+            "x": 64,
+            "y": 64
+          },
+          "scene_id": "dispatch-hall",
+          "shot": "cinematic medium-wide shot",
+          "text": [
+            {
+              "anchor": "top-left",
+              "content": "The last light leaves dispatch.",
+              "id": "p01-01-t01",
+              "kind": "caption",
+              "priority": 1,
+              "speaker": null,
+              "tail_target": null
+            }
+          ]
+        },
+        {
+          "action": "No bridge. I take the service route.",
+          "beat": "No bridge. I take the service route.",
+          "characters": [
+            "mira"
+          ],
+          "composition": "Mira framed on a clear third with protected text space",
+          "continuity": [
+            "mira:amber scarf"
+          ],
+          "expression": "focused determination",
+          "id": "p01-02",
+          "lighting": "amber rim light against cool shadows",
+          "negative": [
+            "text",
+            "speech bubbles",
+            "watermark"
+          ],
+          "order": 2,
+          "rect": {
+            "height": 1064,
+            "width": 720,
+            "x": 64,
+            "y": 1272
+          },
+          "scene_id": "dispatch-hall",
+          "shot": "cinematic medium-wide shot",
+          "text": [
+            {
+              "anchor": "top-left",
+              "content": "No bridge. I take the service route.",
+              "id": "p01-02-t01",
+              "kind": "dialogue",
+              "priority": 1,
+              "speaker": "mira",
+              "tail_target": [
+                0.7,
+                0.55
+              ]
+            }
+          ]
+        },
+        {
+          "action": "Golden roots awaken below.",
+          "beat": "Golden roots awaken below.",
+          "characters": [
+            "mira"
+          ],
+          "composition": "Mira framed on a clear third with protected text space",
+          "continuity": [
+            "mira:amber scarf"
+          ],
+          "expression": "focused determination",
+          "id": "p01-03",
+          "lighting": "amber rim light against cool shadows",
+          "negative": [
+            "text",
+            "speech bubbles",
+            "watermark"
+          ],
+          "order": 3,
+          "rect": {
+            "height": 1064,
+            "width": 720,
+            "x": 816,
+            "y": 1272
+          },
+          "scene_id": "service-garden",
+          "shot": "cinematic medium-wide shot",
+          "text": [
+            {
+              "anchor": "top-left",
+              "content": "Golden roots awaken below.",
+              "id": "p01-03-t01",
+              "kind": "caption",
+              "priority": 1,
+              "speaker": null,
+              "tail_target": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "schema_version": "1.0"
+}

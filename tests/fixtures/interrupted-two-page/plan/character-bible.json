@@ -1,0 +1,41 @@
+{
+  "characters": [
+    {
+      "age_band": "young-adult",
+      "id": "mira",
+      "motivation": "deliver the last light seed",
+      "name": "Mira",
+      "personality": [
+        "resourceful",
+        "kind"
+      ],
+      "pronouns": "she/her",
+      "reference_path": "references/characters/mira.png",
+      "role": "courier",
+      "speech": "short practical sentences",
+      "visual_fingerprint": {
+        "avoid": [
+          "logos",
+          "generated text"
+        ],
+        "face": "round face with wide dark eyes",
+        "hair": "chin-length black bob",
+        "invariants": [
+          "amber scarf",
+          "circular brass bag clasp"
+        ],
+        "palette": [
+          "charcoal",
+          "cream",
+          "amber"
+        ],
+        "signature_props": [
+          "rectangular courier case"
+        ],
+        "silhouette": "short compact build",
+        "wardrobe": "cream courier jacket and dark trousers"
+      }
+    }
+  ],
+  "schema_version": "1.0"
+}

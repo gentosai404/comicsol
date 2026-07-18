@@ -1,0 +1,46 @@
+{
+  "characters": [
+    {
+      "age_band": "young-adult",
+      "id": "mira",
+      "motivation": "deliver the last sunlight before it fades",
+      "name": "Mira",
+      "personality": [
+        "resourceful",
+        "compassionate"
+      ],
+      "pronouns": "she/her",
+      "reference_path": "references/characters/mira.png",
+      "role": "courier",
+      "speech": "brief practical sentences",
+      "visual_fingerprint": {
+        "avoid": [
+          "logos",
+          "generated text",
+          "franchise marks"
+        ],
+        "face": "round expressive face with amber eyes",
+        "hair": "chin-length black bob",
+        "invariants": [
+          "amber scarf",
+          "black bob",
+          "cream jacket",
+          "brass-clasp case"
+        ],
+        "palette": [
+          "charcoal",
+          "cream",
+          "amber",
+          "cyan"
+        ],
+        "signature_props": [
+          "rectangular courier case with circular brass clasp",
+          "sealed sunlight vial"
+        ],
+        "silhouette": "short compact build",
+        "wardrobe": "cream utility jacket and charcoal trousers"
+      }
+    }
+  ],
+  "schema_version": "1.0"
+}

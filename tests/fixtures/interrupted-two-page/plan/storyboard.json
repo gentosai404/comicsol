@@ -1,0 +1,95 @@
+{
+  "pages": [
+    {
+      "layout": "full-page",
+      "number": 1,
+      "panels": [
+        {
+          "action": "Mira reaches the broken bridge.",
+          "beat": "Mira reaches the broken bridge.",
+          "characters": [
+            "mira"
+          ],
+          "composition": "Mira framed on a clear third with protected text space",
+          "continuity": [
+            "mira:amber scarf"
+          ],
+          "expression": "focused determination",
+          "id": "p01-01",
+          "lighting": "amber rim light against cool shadows",
+          "negative": [
+            "text",
+            "speech bubbles",
+            "watermark"
+          ],
+          "order": 1,
+          "rect": {
+            "height": 2272,
+            "width": 1472,
+            "x": 64,
+            "y": 64
+          },
+          "scene_id": "dispatch-hall",
+          "shot": "cinematic medium-wide shot",
+          "text": [
+            {
+              "anchor": "top-left",
+              "content": "Mira reaches the broken bridge.",
+              "id": "p01-01-t01",
+              "kind": "caption",
+              "priority": 1,
+              "speaker": null,
+              "tail_target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "layout": "full-page",
+      "number": 2,
+      "panels": [
+        {
+          "action": "The service gate remains ahead.",
+          "beat": "The service gate remains ahead.",
+          "characters": [
+            "mira"
+          ],
+          "composition": "Mira framed on a clear third with protected text space",
+          "continuity": [
+            "mira:amber scarf"
+          ],
+          "expression": "focused determination",
+          "id": "p01-02",
+          "lighting": "amber rim light against cool shadows",
+          "negative": [
+            "text",
+            "speech bubbles",
+            "watermark"
+          ],
+          "order": 2,
+          "rect": {
+            "height": 2272,
+            "width": 1472,
+            "x": 64,
+            "y": 64
+          },
+          "scene_id": "service-garden",
+          "shot": "cinematic medium-wide shot",
+          "text": [
+            {
+              "anchor": "top-left",
+              "content": "The service gate remains ahead.",
+              "id": "p01-02-t01",
+              "kind": "caption",
+              "priority": 1,
+              "speaker": null,
+              "tail_target": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "schema_version": "1.0"
+}

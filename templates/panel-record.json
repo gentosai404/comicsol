@@ -1,0 +1,65 @@
+{
+  "attempts": 0,
+  "checks": [
+    {
+      "evidence": "",
+      "id": "character-identity",
+      "result": "fail",
+      "severity": "error"
+    },
+    {
+      "evidence": "",
+      "id": "anatomy",
+      "result": "fail",
+      "severity": "error"
+    },
+    {
+      "evidence": "",
+      "id": "action",
+      "result": "fail",
+      "severity": "error"
+    },
+    {
+      "evidence": "",
+      "id": "composition",
+      "result": "fail",
+      "severity": "error"
+    },
+    {
+      "evidence": "",
+      "id": "continuity",
+      "result": "fail",
+      "severity": "error"
+    },
+    {
+      "evidence": "",
+      "id": "text-free",
+      "result": "fail",
+      "severity": "error"
+    },
+    {
+      "evidence": "",
+      "id": "technical",
+      "result": "fail",
+      "severity": "error"
+    }
+  ],
+  "clean_path": null,
+  "decision": "regenerate",
+  "dimensions": {
+    "height": 0,
+    "width": 0
+  },
+  "generation": {
+    "capability_name": null,
+    "completed_at": null,
+    "reference_paths": []
+  },
+  "panel_id": "panel-id",
+  "raw_path": null,
+  "raw_sha256": null,
+  "retry_reason": "panel has not been generated or inspected",
+  "schema_version": "1.0",
+  "source_prompt_path": null,
+  "unresolved_warnings": []
+}

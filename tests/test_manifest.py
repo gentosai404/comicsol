@@ -1,0 +1,253 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from comic_sol import (  # noqa: E402
+    append_event,
+    atomic_write_bytes,
+    atomic_write_json,
+    canonical_json_bytes,
+    doctor,
+    init_project,
+    layout_rects,
+    main,
+    read_json,
+    rectangles_overlap,
+    sha256_file,
+    slugify,
+    transition,
+)
+import comic_sol  # noqa: E402
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def test_init_preserves_source_and_creates_complete_skeleton(self):
+        request = {"mode": "short_prompt", "language": "en"}
+        project = init_project(
+            self.root, "Sunlight Courier", b"A courier.\r\nExact bytes.", request
+        )
+
+        self.assertEqual("sunlight-courier", project.name)
+        self.assertEqual(
+            b"A courier.\r\nExact bytes.",
+            (project / "source/input.txt").read_bytes(),
+        )
+        expected_directories = (
+            "source",
+            "plan",
+            "references/characters",
+            "references/scenes",
+            "prompts/references",
+            "prompts/panels",
+            "panels/raw",
+            "panels/clean",
+            "panels/lettered",
+            "qa/panels",
+            "pages",
+            "exports",
+            "logs",
+        )
+        for relative in expected_directories:
+            self.assertTrue((project / relative).is_dir(), relative)
+
+        manifest = read_json(project / "project.json")
+        self.assertEqual("INIT", manifest["status"])
+        self.assertEqual("sunlight-courier", manifest["project_id"])
+        self.assertEqual("Sunlight Courier", manifest["title"])
+        self.assertEqual(
+            hashlib.sha256(b"A courier.\r\nExact bytes.").hexdigest(),
+            manifest["input"]["source_sha256"],
+        )
+        self.assertEqual(request, read_json(project / "source/request.json"))
+        self.assertEqual(1, len((project / "logs/events.jsonl").read_text("utf-8").splitlines()))
+
+    def test_init_allocates_deterministic_suffix_and_never_overwrites(self):
+        request = {"mode": "short_prompt", "language": "en"}
+        first = init_project(self.root, "Story", b"First", request)
+        second = init_project(self.root, "Story", b"Second", request)
+        third = init_project(self.root, "Story", b"Third", request)
+
+        self.assertEqual(["story", "story-2", "story-3"], [first.name, second.name, third.name])
+        self.assertEqual(b"First", (first / "source/input.txt").read_bytes())
+        self.assertEqual(b"Second", (second / "source/input.txt").read_bytes())
+        self.assertEqual(b"Third", (third / "source/input.txt").read_bytes())
+
+    def test_transition_rejects_skips_and_allows_blocked_and_warning_terminal(self):
+        project = init_project(
+            self.root,
+            "Story",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        with self.assertRaisesRegex(ValueError, "INIT.*STORYBOARDED"):
+            transition(project, "STORYBOARDED")
+
+        result = transition(project, "PLANNED")
+        self.assertEqual("PLANNED", result["status"])
+        blocked = transition(project, "BLOCKED", "image capability unavailable")
+        self.assertEqual("BLOCKED", blocked["status"])
+        self.assertIn("image capability unavailable", blocked["warnings"])
+
+        export_project = init_project(
+            self.root,
+            "Exported Story",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        for state in (
+            "PLANNED",
+            "SCRIPTED",
+            "STORYBOARDED",
+            "REFERENCES_READY",
+            "PANELS_READY",
+            "QA_READY",
+            "LETTERED",
+            "COMPOSED",
+            "EXPORTED",
+        ):
+            transition(export_project, state)
+        terminal = transition(export_project, "COMPLETE_WITH_WARNINGS", "minor prop drift")
+        self.assertEqual("COMPLETE_WITH_WARNINGS", terminal["status"])
+        self.assertIn("minor prop drift", terminal["warnings"])
+
+    def test_canonical_json_read_hash_and_atomic_writes(self):
+        self.assertEqual(
+            '{"a":"é","z":1}'.encode("utf-8"),
+            canonical_json_bytes({"z": 1, "a": "é"}),
+        )
+        binary_path = self.root / "nested/payload.bin"
+        atomic_write_bytes(binary_path, b"payload")
+        self.assertEqual(b"payload", binary_path.read_bytes())
+        self.assertEqual(hashlib.sha256(b"payload").hexdigest(), sha256_file(binary_path))
+
+        json_path = self.root / "nested/value.json"
+        atomic_write_json(json_path, {"z": 1, "a": "é"})
+        self.assertEqual(
+            '{\n  "a": "é",\n  "z": 1\n}\n'.encode("utf-8"),
+            json_path.read_bytes(),
+        )
+        self.assertEqual({"a": "é", "z": 1}, read_json(json_path))
+        self.assertEqual([], list((self.root / "nested").glob("*.tmp")))
+
+    def test_atomic_write_preserves_unrelated_interrupted_temp_file(self):
+        interrupted = self.root / ".project.json.interrupted.tmp"
+        interrupted.write_bytes(b"recoverable partial data")
+
+        atomic_write_json(self.root / "project.json", {"status": "INIT"})
+
+        self.assertEqual(b"recoverable partial data", interrupted.read_bytes())
+
+    def test_transition_publishes_manifest_only_after_event_succeeds(self):
+        project = init_project(
+            self.root,
+            "Ordering",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        before = (project / "project.json").read_bytes()
+        with mock.patch.object(
+            comic_sol, "append_event", side_effect=OSError("event write failed")
+        ):
+            with self.assertRaisesRegex(OSError, "event write failed"):
+                transition(project, "PLANNED")
+        self.assertEqual(before, (project / "project.json").read_bytes())
+
+    def test_append_event_is_canonical_jsonl_and_redacts_sensitive_values(self):
+        project = init_project(
+            self.root,
+            "Events",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        append_event(
+            project,
+            "tool.failed",
+            {"panel_id": "p01-01", "api_key": "do-not-log", "count": 2},
+        )
+        lines = (project / "logs/events.jsonl").read_text("utf-8").splitlines()
+        event = json.loads(lines[-1])
+        self.assertEqual("tool.failed", event["event"])
+        self.assertNotIn("api_key", event["details"])
+        self.assertNotIn("do-not-log", lines[-1])
+        self.assertEqual(canonical_json_bytes(event), lines[-1].encode("utf-8"))
+
+    def test_append_event_rejects_raw_payloads_and_absolute_paths(self):
+        project = init_project(
+            self.root,
+            "Safe Events",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        event_path = project / "logs/events.jsonl"
+        before = event_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "unsupported event detail"):
+            append_event(project, "tool.failed", {"raw_provider_response": "private"})
+        with self.assertRaisesRegex(ValueError, "relative project path"):
+            append_event(project, "artifact.created", {"source_path": Path("/private/input.txt")})
+        with self.assertRaisesRegex(ValueError, "event name"):
+            append_event(project, "raw provider response with spaces", {"count": 1})
+        self.assertEqual(before, event_path.read_bytes())
+
+    def test_transition_event_records_warning_presence_not_warning_text(self):
+        project = init_project(
+            self.root,
+            "Warning Event",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        warning = "private person@example.test has a token"
+        transition(project, "BLOCKED", warning)
+        line = (project / "logs/events.jsonl").read_text("utf-8").splitlines()[-1]
+        event = json.loads(line)
+        self.assertEqual(
+            {"from": "INIT", "to": "BLOCKED", "warning_present": True},
+            event["details"],
+        )
+        self.assertNotIn(warning, line)
+
+    def test_slug_helpers_and_layout_interfaces_are_available(self):
+        self.assertEqual("hello-world", slugify("  Héllo, World!  "))
+        self.assertEqual("comic-sol-project", slugify("---"))
+        self.assertTrue(callable(layout_rects))
+        self.assertTrue(callable(rectangles_overlap))
+
+    def test_doctor_checks_local_runtime_and_defers_image_capability(self):
+        healthy, messages = doctor(self.root / "doctor-output")
+        self.assertTrue(healthy, messages)
+        for label in ("Python 3.11", "Pillow 11.3.0", "font", "templates", "output root"):
+            self.assertTrue(any(message.startswith("PASS") and label in message for message in messages), label)
+        self.assertIn("INFO image capability: inspect in agent session", messages)
+
+    def test_cli_status_json_reports_manifest(self):
+        project = init_project(
+            self.root,
+            "CLI Story",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["status", os.fspath(project), "--json"])
+        self.assertEqual(0, result)
+        self.assertEqual("INIT", json.loads(output.getvalue())["status"])
+
+
+if __name__ == "__main__":
+    unittest.main()

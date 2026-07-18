@@ -1,0 +1,38 @@
+{
+  "beginning": "Mira receives the last light seed.",
+  "climax": "Mira plants the fading seed.",
+  "ending": "Golden roots relight the city.",
+  "logline": "A courier carries a fading light seed through a dark underground city.",
+  "rating": "teen",
+  "scenes": [
+    {
+      "characters": [
+        "mira"
+      ],
+      "continuity_anchor": "brass walls with amber guide strips",
+      "id": "dispatch-hall",
+      "location": "underground dispatch hall",
+      "purpose": "begin the urgent delivery",
+      "time": "artificial dusk"
+    },
+    {
+      "characters": [
+        "mira"
+      ],
+      "continuity_anchor": "brass walls with amber guide strips",
+      "id": "service-garden",
+      "location": "tower service garden",
+      "purpose": "complete the delivery",
+      "time": "artificial dusk"
+    }
+  ],
+  "schema_version": "1.0",
+  "setting": "A vast underground city awaiting an artificial dawn.",
+  "theme": "Hope grows when it is shared.",
+  "title": "Interrupted Lantern",
+  "tone": [
+    "urgent",
+    "tender"
+  ],
+  "turn": "A tremor closes the direct bridge."
+}
