@@ -180,11 +180,16 @@ project recovery error. Resuming reused the four reviewed courier panels and
 completed. A second resume returned 10 `reuse` actions and preserved the hashes and
 nanosecond mtimes of all 33 files exactly.
 
-The stopwatch demo rehearsal completed in **2:38.05**, below the three-minute
-limit. The `/feedback` command was run in this Codex session and confirmed
-uploaded ("Feedback uploaded. Thanks for the feedback!"), returning the real
-feedback Session ID (Thread ID) for this Codex run:
-`019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.
+The rendered demo is **1:49.13** (1920×1080, H.264/AAC), below the three-minute
+limit. It uses only committed Comic Sol artifacts and deterministic evidence. The
+`/feedback` command was run in the final Codex session and confirmed uploaded
+("Feedback uploaded. Thanks for the feedback!"), returning the real feedback
+Session ID (Thread ID): `019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.
+
+A fresh native Windows 11 clean-room run used Python 3.11.9, installed Pillow
+11.3.0 in a new virtual environment, cloned the public repository, passed `doctor`,
+and ran **82 tests successfully** (`OK`, one symlink-privilege test skipped). Linux/WSL
+also runs **82/82 tests successfully**.
 
 ## Build Week evidence and pre-submission checklist
 
