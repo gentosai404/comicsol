@@ -181,7 +181,9 @@ completed. A second resume returned 10 `reuse` actions and preserved the hashes 
 nanosecond mtimes of all 33 files exactly.
 
 The stopwatch demo rehearsal completed in **2:38.05**, below the three-minute
-limit. The real feedback Session ID for this Codex run is
+limit. The `/feedback` command was run in this Codex session and confirmed
+uploaded ("Feedback uploaded. Thanks for the feedback!"), returning the real
+feedback Session ID (Thread ID) for this Codex run:
 `019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.
 
 ## Build Week evidence and pre-submission checklist
@@ -198,7 +200,8 @@ Before submission:
 - Run the full suite and clean-room doctor on Linux or WSL and Windows.
 - Rehearse the demo and confirm its elapsed time is under three minutes.
 - Run `/feedback` in the final Codex session, verify the recorded real Session ID
-  resolves, and copy it into the submission materials.
+  resolves, and copy it into the submission materials. (Done: feedback uploaded;
+  Thread ID `019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.)
 - Confirm the repository contains installation, invocation, testing, support,
   privacy/IP, license, and limitation information but no private prompts or secrets.
 
