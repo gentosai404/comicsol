@@ -726,7 +726,11 @@ def _read_canonical_json(
         _add(issues, relative_path, "file", f"cannot read JSON: {type(error).__name__}: {error}")
         return None
     canonical = (json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    if raw != canonical:
+    # Normalize CRLF so the comparison passes on Windows checkouts where
+    # Git may have converted tracked JSON files (ponytail: keep the
+    # canonical artifact LF-only; tolerate CRLF as input).
+    raw_normalized = raw.replace(b"\r\n", b"\n")
+    if raw_normalized != canonical:
         _add(issues, relative_path, "file", "JSON must use canonical two-space sorted UTF-8 formatting")
     return data
 

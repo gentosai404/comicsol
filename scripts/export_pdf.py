@@ -190,7 +190,8 @@ def export_pdf(project_dir: Path, output_path: Path | None = None) -> Path:
             creationDate=False,
             modDate=False,
         )
-        with temporary_path.open("rb") as handle:
+        # Windows rejects fsync on a read-only descriptor.
+        with temporary_path.open("rb+") as handle:
             os.fsync(handle.fileno())
         _verify_written_pdf(temporary_path, pages)
         os.replace(temporary_path, destination)
