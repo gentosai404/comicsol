@@ -90,6 +90,21 @@ validation, resume planning, lettering, page composition, PDF export, and report
 rendering. Provider access remains in the agent capability plane; secrets and
 provider SDKs do not enter deterministic scripts.
 
+## Hybrid lettering
+
+Dialogue uses bundled Comic Neue Regular, and inline `**bold**` emphasis uses Comic
+Neue Bold with wrapping and centering measured across the mixed runs. Font selection
+is per-character: bundled Noto Sans covers Greek and Cyrillic when Comic Neue does not,
+while a character absent from both fonts is preserved as Noto Sans `.notdef` rather
+than silently dropped. The `--font` option still overrides the regular dialogue font;
+its bold counterpart may fall back to Comic Neue Bold.
+
+Pillow fits dialogue into adaptive oval balloons, attaches each tail at the nearest
+oval boundary toward its target, and draws compact light caption strips sized to their
+text. Authored SFX takes the other half of the hybrid pipeline: the image model draws
+the exact SFX into the artwork, and visual QA verifies spelling, count, and authorization.
+Pillow validates and counts SFX but reserves no placement and changes no pixels for it.
+
 ## Test
 
 Run the complete offline suite:
@@ -123,8 +138,8 @@ py -3.11 -m venv "$TempRoot\venv"
 |---|---|---|
 | Inputs | Short prompt, pasted prose, UTF-8 `.txt` and `.md`, resume | Source limit and defaults are documented in the workflow reference. |
 | Output | Panel PNGs, page PNGs, comic PDF, manifest, QA report | Editable intermediate artifacts remain local. |
-| Lettering | Bundled Noto Sans; Latin, Greek, Cyrillic | Font license and digest are in `assets/README.md`. |
-| Image generation | Agent-exposed tool returning a local raster | Reference images and exact dimensions are used only when supported. |
+| Lettering | Comic Neue Regular/Bold; per-character Noto Sans fallback | Adaptive oval dialogue, actual inline bold emphasis, compact captions, and hybrid authored SFX are supported. Font licenses and digests are in `assets/README.md`. |
+| Image generation | Agent-exposed image model returning a local raster | References and exact dimensions are used when supported; exact authored SFX is checked by visual QA. |
 | Deterministic scripts | Python 3.11 and Pillow 11.3.0 | Offline and provider-neutral. |
 
 ## Privacy, IP, and Limitations
@@ -138,7 +153,10 @@ than raw credentials or story content.
 Comic Sol requests original manga/anime direction and translates disallowed artist
 or franchise imitation into high-level visual traits. It does not promise perfect
 character continuity: results depend on the available image capability, especially
-its reference-image and dimension support. The bundled font does not cover CJK.
+its reference-image and dimension support. The bundled font set does not cover CJK;
+characters absent from both bundled fonts are preserved as visible `.notdef` fallback boxes
+unless a compatible regular `--font` override covers them. Image-model SFX
+spelling is not deterministic, so visual QA and bounded retries remain required.
 Offline fixtures prove deterministic stages, not live image quality. Large projects
 beyond four pages or twelve panels require an explicit scope decision.
 
@@ -213,5 +231,6 @@ Before submission:
 ## License
 
 Comic Sol's original code and documentation are available under the MIT License in
-[`LICENSE`](LICENSE). The bundled Noto Sans font remains separately licensed under
-the SIL Open Font License 1.1; see [`assets/README.md`](assets/README.md).
+[`LICENSE`](LICENSE). The bundled Comic Neue and Noto Sans fonts remain separately
+licensed under the SIL Open Font License 1.1; see
+[`assets/README.md`](assets/README.md).

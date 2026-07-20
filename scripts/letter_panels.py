@@ -6,18 +6,24 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import math
 import re
+import struct
 import sys
 import unicodedata
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from comic_sol import atomic_write_bytes, read_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FONT_PATH = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+FONT_PATH = ROOT / "assets/fonts/ComicNeue-Regular.ttf"
+FONT_PATH_BOLD = ROOT / "assets/fonts/ComicNeue-Bold.ttf"
+FONT_PATH_FALLBACK = ROOT / "assets/fonts/NotoSans-Regular.ttf"
 ANCHORS = (
     "top-left",
     "top-center",
@@ -46,6 +52,355 @@ def normalize_content(text: str) -> str:
 def normalized_word_count(text: str) -> int:
     """Count whitespace-separated words after deterministic normalization."""
     return len(normalize_content(text).split())
+
+
+def _parse_emphasis(text: str) -> list[tuple[str, bool]]:
+    """Parse complete ``**bold**`` spans into text and emphasis chunks."""
+    parts = text.split("**")
+    if len(parts) % 2 == 0 or any(
+        not parts[index].strip() for index in range(1, len(parts), 2)
+    ):
+        return [(text, False)]
+    return [(part, index % 2 != 0) for index, part in enumerate(parts) if part]
+
+
+@lru_cache(maxsize=None)
+def _unicode_cmap_subtables(path: str) -> tuple[bytes, ...]:
+    """Return the Unicode cmap subtables from one deterministic SFNT face."""
+    data = Path(path).read_bytes()
+    sfnt_offset = 0
+    if data[:4] == b"ttcf":
+        if len(data) < 16 or struct.unpack_from(">I", data, 8)[0] < 1:
+            raise OSError(f"invalid TrueType collection: {path}")
+        sfnt_offset = struct.unpack_from(">I", data, 12)[0]
+    if sfnt_offset + 12 > len(data):
+        raise OSError(f"invalid font header: {path}")
+
+    table_count = struct.unpack_from(">H", data, sfnt_offset + 4)[0]
+    cmap: bytes | None = None
+    for index in range(table_count):
+        record_offset = sfnt_offset + 12 + index * 16
+        if record_offset + 16 > len(data):
+            raise OSError(f"invalid font table directory: {path}")
+        tag, _, offset, length = struct.unpack_from(">4sIII", data, record_offset)
+        if tag == b"cmap":
+            if offset + length > len(data):
+                raise OSError(f"invalid cmap table: {path}")
+            cmap = data[offset:offset + length]
+            break
+    if cmap is None or len(cmap) < 4:
+        return ()
+
+    record_count = struct.unpack_from(">H", cmap, 2)[0]
+    subtables: list[bytes] = []
+    seen_offsets: set[int] = set()
+    for index in range(record_count):
+        record_offset = 4 + index * 8
+        if record_offset + 8 > len(cmap):
+            raise OSError(f"invalid cmap encoding records: {path}")
+        platform, encoding, offset = struct.unpack_from(">HHI", cmap, record_offset)
+        if not (platform == 0 or platform == 3 and encoding in {1, 10}):
+            continue
+        if offset in seen_offsets or offset + 4 > len(cmap):
+            continue
+        seen_offsets.add(offset)
+        format_number = struct.unpack_from(">H", cmap, offset)[0]
+        if format_number in {8, 10, 12, 13}:
+            if offset + 8 > len(cmap):
+                continue
+            length = struct.unpack_from(">I", cmap, offset + 4)[0]
+        else:
+            length = struct.unpack_from(">H", cmap, offset + 2)[0]
+        if length >= 4 and offset + length <= len(cmap):
+            subtables.append(cmap[offset:offset + length])
+    return tuple(subtables)
+
+
+def _cmap_glyph_id(table: bytes, codepoint: int) -> int:
+    """Return a cmap glyph id, with zero meaning that no glyph is mapped."""
+    format_number = struct.unpack_from(">H", table, 0)[0]
+    if format_number == 0:
+        return table[6 + codepoint] if codepoint <= 0xFF and 6 + codepoint < len(table) else 0
+    if format_number == 4:
+        if codepoint > 0xFFFF or len(table) < 16:
+            return 0
+        segment_count = struct.unpack_from(">H", table, 6)[0] // 2
+        end_codes = 14
+        start_codes = end_codes + segment_count * 2 + 2
+        deltas = start_codes + segment_count * 2
+        range_offsets = deltas + segment_count * 2
+        if range_offsets + segment_count * 2 > len(table):
+            return 0
+        for index in range(segment_count):
+            end = struct.unpack_from(">H", table, end_codes + index * 2)[0]
+            if codepoint > end:
+                continue
+            start = struct.unpack_from(">H", table, start_codes + index * 2)[0]
+            if codepoint < start:
+                return 0
+            delta = struct.unpack_from(">h", table, deltas + index * 2)[0]
+            range_offset_position = range_offsets + index * 2
+            range_offset = struct.unpack_from(">H", table, range_offset_position)[0]
+            if range_offset == 0:
+                return (codepoint + delta) & 0xFFFF
+            glyph_position = range_offset_position + range_offset + (codepoint - start) * 2
+            if glyph_position + 2 > len(table):
+                return 0
+            glyph_id = struct.unpack_from(">H", table, glyph_position)[0]
+            return (glyph_id + delta) & 0xFFFF if glyph_id else 0
+        return 0
+    if format_number == 6:
+        if len(table) < 10:
+            return 0
+        first, count = struct.unpack_from(">HH", table, 6)
+        index = codepoint - first
+        position = 10 + index * 2
+        return struct.unpack_from(">H", table, position)[0] if 0 <= index < count and position + 2 <= len(table) else 0
+    if format_number == 10:
+        if len(table) < 20:
+            return 0
+        first, count = struct.unpack_from(">II", table, 12)
+        index = codepoint - first
+        position = 20 + index * 2
+        return struct.unpack_from(">H", table, position)[0] if 0 <= index < count and position + 2 <= len(table) else 0
+    if format_number in {12, 13}:
+        if len(table) < 16:
+            return 0
+        group_count = struct.unpack_from(">I", table, 12)[0]
+        for index in range(group_count):
+            position = 16 + index * 12
+            if position + 12 > len(table):
+                return 0
+            start, end, start_glyph = struct.unpack_from(">III", table, position)
+            if codepoint < start:
+                return 0
+            if codepoint <= end:
+                return start_glyph if format_number == 13 else start_glyph + codepoint - start
+        return 0
+    return 0
+
+
+def _font_supports(path: Path, character: str) -> bool:
+    """Return whether a font's Unicode cmap maps one character to a glyph."""
+    if len(character) != 1:
+        raise ValueError("glyph coverage requires exactly one character")
+    codepoint = ord(character)
+    return any(_cmap_glyph_id(table, codepoint) != 0 for table in _unicode_cmap_subtables(str(path)))
+
+
+@lru_cache(maxsize=None)
+def _load_font_path(path: str, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(path, size)
+
+
+def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    """Load a dialogue face, falling back when the requested face is unavailable."""
+    path = FONT_PATH_BOLD if bold else FONT_PATH
+    try:
+        return _load_font_path(str(path), size)
+    except OSError:
+        return _load_font_path(str(FONT_PATH_FALLBACK), size)
+
+
+def _font_runs(
+    text: str,
+    size: int,
+    bold: bool = False,
+    primary: ImageFont.FreeTypeFont | None = None,
+) -> tuple[tuple[str, ImageFont.FreeTypeFont], ...]:
+    """Group text into adjacent runs using exact per-character font fallback."""
+    primary = primary or _load_font(size, bold)
+    fallback = _load_font_path(str(FONT_PATH_FALLBACK), size)
+    primary_path = Path(primary.path)
+    runs: list[tuple[str, ImageFont.FreeTypeFont]] = []
+    for character in text:
+        selected = primary if character == "\n" or _font_supports(primary_path, character) else fallback
+        if runs and Path(runs[-1][1].path) == Path(selected.path):
+            runs[-1] = (runs[-1][0] + character, selected)
+        else:
+            runs.append((character, selected))
+    return tuple(runs)
+
+
+def _styled_font_runs(
+    text: str,
+    regular_font: ImageFont.FreeTypeFont,
+) -> tuple[tuple[str, ImageFont.FreeTypeFont], ...]:
+    """Compose emphasis chunks and per-character fallback into drawable runs."""
+    runs: list[tuple[str, ImageFont.FreeTypeFont]] = []
+    for chunk, bold in _parse_emphasis(text):
+        primary = _load_font(regular_font.size, True) if bold else regular_font
+        for run_text, run_font in _font_runs(chunk, regular_font.size, bold, primary):
+            if runs and Path(runs[-1][1].path) == Path(run_font.path):
+                runs[-1] = (runs[-1][0] + run_text, run_font)
+            else:
+                runs.append((run_text, run_font))
+    return tuple(runs)
+
+
+@dataclass(frozen=True)
+class _StyledLine:
+    runs: tuple[tuple[str, ImageFont.FreeTypeFont], ...]
+    width: float
+    top: int
+    bottom: int
+
+    @property
+    def height(self) -> int:
+        return self.bottom - self.top
+
+
+@dataclass(frozen=True)
+class _StyledLayout:
+    lines: tuple[_StyledLine, ...]
+    spacing: int
+
+    @property
+    def width(self) -> float:
+        return max((line.width for line in self.lines), default=0.0)
+
+    @property
+    def height(self) -> int:
+        return sum(line.height for line in self.lines) + self.spacing * max(0, len(self.lines) - 1)
+
+
+def _merge_font_tokens(
+    tokens: list[tuple[str, ImageFont.FreeTypeFont]],
+) -> tuple[tuple[str, ImageFont.FreeTypeFont], ...]:
+    """Merge adjacent character tokens that use the same font face."""
+    runs: list[tuple[str, ImageFont.FreeTypeFont]] = []
+    for character, font in tokens:
+        if runs and Path(runs[-1][1].path) == Path(font.path):
+            runs[-1] = (runs[-1][0] + character, font)
+        else:
+            runs.append((character, font))
+    return tuple(runs)
+
+
+def _measure_styled_line(
+    draw: ImageDraw.ImageDraw,
+    tokens: list[tuple[str, ImageFont.FreeTypeFont]],
+    regular_font: ImageFont.FreeTypeFont,
+) -> _StyledLine:
+    """Measure one mixed-font line from the baseline used to draw it."""
+    runs = _merge_font_tokens(tokens)
+    width = sum(draw.textlength(text, font=run_font) for text, run_font in runs)
+    if runs:
+        boxes = [
+            draw.textbbox((0, 0), text, font=run_font, anchor="ls")
+            for text, run_font in runs
+        ]
+    else:
+        boxes = [draw.textbbox((0, 0), "Ag", font=regular_font, anchor="ls")]
+    return _StyledLine(
+        runs=runs,
+        width=width,
+        top=min(box[1] for box in boxes),
+        bottom=max(box[3] for box in boxes),
+    )
+
+
+def _layout_styled_text(
+    draw: ImageDraw.ImageDraw,
+    content: str,
+    regular_font: ImageFont.FreeTypeFont,
+    maximum_width: float,
+    spacing: int = 6,
+    emphasis: bool = True,
+) -> _StyledLayout | None:
+    """Wrap parsed dialogue runs using the exact fonts that will draw them."""
+    if maximum_width <= 0:
+        return None
+
+    paragraphs: list[list[tuple[str, ImageFont.FreeTypeFont]]] = [[]]
+    source_runs = (
+        _styled_font_runs(content, regular_font)
+        if emphasis
+        else _font_runs(content, regular_font.size, primary=regular_font)
+    )
+    for text, run_font in source_runs:
+        for character in text:
+            if character == "\n":
+                paragraphs.append([])
+            else:
+                paragraphs[-1].append((character, run_font))
+
+    lines: list[_StyledLine] = []
+    for paragraph in paragraphs:
+        words: list[
+            tuple[
+                list[tuple[str, ImageFont.FreeTypeFont]],
+                list[tuple[str, ImageFont.FreeTypeFont]],
+            ]
+        ] = []
+        separator: list[tuple[str, ImageFont.FreeTypeFont]] = []
+        word: list[tuple[str, ImageFont.FreeTypeFont]] = []
+        for token in paragraph:
+            if token[0].isspace():
+                if word:
+                    words.append((separator, word))
+                    separator = []
+                    word = []
+                separator.append(token)
+            else:
+                word.append(token)
+        if word:
+            words.append((separator, word))
+
+        if not words:
+            lines.append(_measure_styled_line(draw, [], regular_font))
+            continue
+
+        current = words[0][0] + words[0][1]
+        first_line = _measure_styled_line(draw, current, regular_font)
+        if first_line.width > maximum_width:
+            return None
+        for between, next_word in words[1:]:
+            candidate = current + between + next_word
+            candidate_line = _measure_styled_line(draw, candidate, regular_font)
+            if candidate_line.width <= maximum_width:
+                current = candidate
+                continue
+            lines.append(_measure_styled_line(draw, current, regular_font))
+            current = list(next_word)
+            next_line = _measure_styled_line(draw, current, regular_font)
+            if next_line.width > maximum_width:
+                return None
+        lines.append(_measure_styled_line(draw, current, regular_font))
+
+    return _StyledLayout(tuple(lines), spacing)
+
+
+def _draw_font_runs(
+    draw: ImageDraw.ImageDraw,
+    runs: tuple[tuple[str, ImageFont.FreeTypeFont], ...],
+    position: tuple[float, float],
+    fill: tuple[int, ...],
+) -> None:
+    """Draw one line of mixed-font runs from a shared baseline."""
+    x, y = position
+    for text, run_font in runs:
+        draw.text((x, y), text, font=run_font, fill=fill, anchor="ls")
+        x += draw.textlength(text, font=run_font)
+
+
+def _draw_styled_layout(
+    draw: ImageDraw.ImageDraw,
+    layout: _StyledLayout,
+    center_x: float,
+    top_y: float,
+    fill: tuple[int, ...],
+) -> None:
+    """Draw a measured layout with every line centered independently."""
+    line_top = top_y
+    for line in layout.lines:
+        _draw_font_runs(
+            draw,
+            line.runs,
+            (center_x - line.width / 2, line_top - line.top),
+            fill,
+        )
+        line_top += line.height + layout.spacing
 
 
 def _known_character(character_bible: list[dict], speaker: object) -> bool:
@@ -136,6 +491,87 @@ def _overlap(first: dict[str, int], second: dict[str, int]) -> bool:
     )
 
 
+def _fitted_item_rect(
+    draw: ImageDraw.ImageDraw,
+    item: dict,
+    maximum: dict[str, int],
+    font: ImageFont.FreeTypeFont,
+) -> dict[str, int]:
+    """Fit a rendered text shape inside its anchor's maximum placement area."""
+    kind = item.get("kind")
+    if kind == "caption":
+        layout = _layout_styled_text(
+            draw,
+            normalize_content(item.get("content", "")),
+            font,
+            max(1, maximum["width"] - 40),
+            emphasis=False,
+        )
+        if layout is None:
+            raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
+        return {
+            "x": maximum["x"],
+            "y": maximum["y"],
+            "width": min(maximum["width"], math.ceil(layout.width) + 40),
+            "height": min(maximum["height"], layout.height + 20),
+        }
+    if kind != "dialogue":
+        return dict(maximum)
+    layout = _layout_styled_text(
+        draw,
+        normalize_content(item.get("content", "")),
+        font,
+        max(1, maximum["width"] - 48),
+    )
+    if layout is None:
+        raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
+    horizontal_padding = max(28, math.ceil(layout.height * 0.25))
+    fitted_width = min(maximum["width"], math.ceil(layout.width) + 2 * horizontal_padding)
+    fitted_height = min(maximum["height"], layout.height + 48)
+
+    anchor = item.get("anchor", "top-left")
+    vertical, horizontal = anchor.split("-", 1) if anchor in ANCHORS else ("top", "left")
+    x = {
+        "left": maximum["x"],
+        "center": maximum["x"] + (maximum["width"] - fitted_width) // 2,
+        "right": maximum["x"] + maximum["width"] - fitted_width,
+    }[horizontal]
+    y = {
+        "top": maximum["y"],
+        "middle": maximum["y"] + (maximum["height"] - fitted_height) // 2,
+        "bottom": maximum["y"] + maximum["height"] - fitted_height,
+    }[vertical]
+    return {"x": x, "y": y, "width": fitted_width, "height": fitted_height}
+
+
+def _ellipse_tail_polygon(
+    rect: dict[str, int],
+    tail_target: list[float],
+    image_width: int,
+    image_height: int,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[int, int]]:
+    """Return a triangular tail based at the nearest ellipse point toward target."""
+    target_x = min(image_width - 1, max(0, round(float(tail_target[0]) * image_width)))
+    target_y = min(image_height - 1, max(0, round(float(tail_target[1]) * image_height)))
+    center_x = rect["x"] + rect["width"] / 2
+    center_y = rect["y"] + rect["height"] / 2
+    radius_x = max(0.5, rect["width"] / 2)
+    radius_y = max(0.5, rect["height"] / 2)
+    delta_x = target_x - center_x
+    delta_y = target_y - center_y
+    if delta_x == 0 and delta_y == 0:
+        delta_y = 1.0
+    scale = 1 / math.sqrt((delta_x / radius_x) ** 2 + (delta_y / radius_y) ** 2)
+    attachment_x = center_x + delta_x * scale
+    attachment_y = center_y + delta_y * scale
+    length = math.hypot(delta_x, delta_y)
+    tangent_x, tangent_y = -delta_y / length, delta_x / length
+    half_base = max(8.0, min(radius_x, radius_y) * 0.18)
+    base_one = (attachment_x + tangent_x * half_base, attachment_y + tangent_y * half_base)
+    base_two = (attachment_x - tangent_x * half_base, attachment_y - tangent_y * half_base)
+    return base_one, base_two, (target_x, target_y)
+
+
 def _item_font_and_lines(
     draw: ImageDraw.ImageDraw,
     item: dict,
@@ -146,7 +582,23 @@ def _item_font_and_lines(
     start_size = 64 if kind == "sfx" else 42
     content = normalize_content(item.get("content", ""))
     for size in range(start_size, 23, -2):
-        font = ImageFont.truetype(str(FONT_PATH), size)
+        font = _load_font(size)
+        if kind in {"dialogue", "caption"}:
+            layout = _layout_styled_text(
+                draw,
+                content,
+                font,
+                max(1, rect["width"] - 2 * padding),
+                emphasis=kind == "dialogue",
+            )
+            if layout is None:
+                continue
+            if layout.height <= rect["height"] - 2 * padding:
+                return font, tuple(
+                    "".join(text for text, _ in line.runs)
+                    for line in layout.lines
+                )
+            continue
         lines = _wrap_lines(draw, content, font, max(1, rect["width"] - 2 * padding))
         if not lines:
             continue
@@ -173,6 +625,8 @@ def render_text_item(
         raise ValueError(f"text item {item.get('id', 'unknown')} has unknown kind")
     if kind == "dialogue" and not _known_character(character_bible, item.get("speaker")):
         raise ValueError(f"unknown dialogue character: {item.get('speaker')}")
+    if kind == "sfx":
+        return
 
     image_width, image_height = draw._image.size
     x0 = max(0, int(rect["x"]))
@@ -181,44 +635,76 @@ def render_text_item(
     y1 = min(image_height - 1, y0 + max(1, int(rect["height"])))
     bounded = {"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}
     padding = 24 if kind == "dialogue" else 20 if kind == "caption" else 8
-    lines = _wrap_lines(draw, content, font, max(1, bounded["width"] - 2 * padding))
-    if not lines:
-        raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
-    text_width, text_height = _line_metrics(draw, lines, font)
+    layout = None
+    if kind in {"dialogue", "caption"}:
+        layout = _layout_styled_text(
+            draw,
+            content,
+            font,
+            max(1, bounded["width"] - 2 * padding),
+            emphasis=kind == "dialogue",
+        )
+        if layout is None:
+            raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
+        text_width, text_height = layout.width, layout.height
+        lines: tuple[str, ...] = ()
+    else:
+        lines = _wrap_lines(draw, content, font, max(1, bounded["width"] - 2 * padding))
+        if not lines:
+            raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
+        text_width, text_height = _line_metrics(draw, lines, font)
     text_x = x0 + max(padding, (bounded["width"] - text_width) // 2)
-    text_y = y0 + max(padding, (bounded["height"] - text_height) // 2)
+    if kind in {"dialogue", "caption"}:
+        text_y = y0 + max(padding, (bounded["height"] - text_height) / 2)
+        if kind == "caption":
+            text_y = y0 + max(0, (bounded["height"] - text_height) / 2)
+    else:
+        text_y = y0 + max(padding, (bounded["height"] - text_height) // 2)
     rendered = "\n".join(lines)
 
     if kind == "dialogue":
         tail = item.get("tail_target")
         if isinstance(tail, list) and len(tail) == 2 and all(isinstance(value, (int, float)) for value in tail):
-            target_x = min(image_width - 1, max(0, round(float(tail[0]) * image_width)))
-            target_y = min(image_height - 1, max(0, round(float(tail[1]) * image_height)))
-            origin = ((x0 + x1) // 2, (y0 + y1) // 2)
-            draw.line((origin, (target_x, target_y)), fill=(15, 15, 15, 255), width=5)
-        draw.rounded_rectangle(
-            (x0, y0, x1, y1), radius=max(12, min(bounded["width"], bounded["height"]) // 8),
-            fill=(255, 255, 255, 255), outline=(15, 15, 15, 255), width=3,
+            base_one, base_two, target = _ellipse_tail_polygon(
+                bounded | {"x": x0, "y": y0}, tail, image_width, image_height
+            )
+            silhouette = Image.new("L", (image_width, image_height), 0)
+            silhouette_draw = ImageDraw.Draw(silhouette)
+            silhouette_draw.polygon((base_one, base_two, target), fill=255)
+            silhouette_draw.ellipse((x0, y0, x1, y1), fill=255)
+            draw.polygon(
+                (base_one, base_two, target),
+                fill=(255, 255, 255, 255),
+            )
+            draw.ellipse((x0, y0, x1, y1), fill=(255, 255, 255, 255))
+            outline = silhouette.filter(ImageFilter.MaxFilter(7))
+            outline.paste(0, (0, 0), silhouette)
+            draw.bitmap((0, 0), outline, fill=(15, 15, 15, 255))
+        else:
+            draw.ellipse(
+                (x0, y0, x1, y1),
+                fill=(255, 255, 255, 255), outline=(15, 15, 15, 255), width=3,
+            )
+        assert layout is not None
+        _draw_styled_layout(
+            draw,
+            layout,
+            x0 + bounded["width"] / 2,
+            text_y,
+            (10, 10, 10, 255),
         )
-        draw.multiline_text((text_x, text_y), rendered, font=font, fill=(10, 10, 10, 255), spacing=6, align="center")
     elif kind == "caption":
-        draw.rounded_rectangle(
-            (x0, y0, x1, y1), radius=8,
-            fill=(8, 10, 14, 190), outline=(245, 245, 245, 230), width=2,
+        draw.rectangle(
+            (x0, y0, x1, y1),
+            fill=(255, 255, 255, 235), outline=(15, 15, 15, 255), width=2,
         )
-        draw.multiline_text((text_x, text_y), rendered, font=font, fill=(255, 255, 255, 255), spacing=6, align="center")
-    else:
-        center_x = (x0 + x1) // 2
-        center_y = (y0 + y1) // 2
-        impact = min(bounded["width"], bounded["height"]) // 5
-        draw.polygon(
-            ((center_x, center_y - impact), (center_x + impact, center_y),
-             (center_x, center_y + impact), (center_x - impact, center_y)),
-            fill=(20, 20, 20, 220), outline=(255, 255, 255, 255),
-        )
-        draw.multiline_text(
-            (text_x, text_y), rendered, font=font, fill=(12, 12, 12, 255),
-            spacing=4, align="center", stroke_width=6, stroke_fill=(255, 255, 255, 255),
+        assert layout is not None
+        _draw_styled_layout(
+            draw,
+            layout,
+            x0 + bounded["width"] / 2,
+            text_y,
+            (15, 15, 15, 255),
         )
 
 
@@ -256,38 +742,56 @@ def letter_panel(
             raise ValueError(f"text item {item.get('id', 'unknown')} has unknown kind")
         if not content or normalized_word_count(content) > limit:
             raise ValueError(f"text item {item.get('id', 'unknown')} exceeds its content limit")
+        anchor = item.get("anchor", "top-left")
+        if anchor not in ANCHORS:
+            raise ValueError(f"text item {item.get('id', 'unknown')} has unknown anchor")
         item["content"] = content
+
+    rendered_text_count = sum(item.get("kind") != "sfx" for item in ordered)
+    sfx_count = len(ordered) - rendered_text_count
+    word_count = sum(normalized_word_count(item["content"]) for item in ordered)
+    summary = {
+        "font_used": str(FONT_PATH),
+        "lettered_path": str(path),
+        "rendered_text_count": rendered_text_count,
+        "sfx_count": sfx_count,
+        "text_count": len(ordered),
+        "word_count": word_count,
+    }
+    if rendered_text_count == 0:
+        return summary
 
     canvas = base.copy()
     draw = ImageDraw.Draw(canvas, "RGBA")
     occupied: list[dict[str, int]] = []
     for item in ordered:
+        if item.get("kind") == "sfx":
+            continue
         requested = "top-left" if item.get("kind") == "caption" else item.get("anchor", "top-left")
-        if requested not in ANCHORS:
-            raise ValueError(f"text item {item.get('id', 'unknown')} has unknown anchor")
         start = ANCHORS.index(requested)
         rect = None
+        font = None
         for offset in range(len(ANCHORS)):
-            candidate = _anchor_rect(ANCHORS[(start + offset) % len(ANCHORS)], panel_width, panel_height)
-            if not any(_overlap(candidate, prior) for prior in occupied):
-                rect = candidate
+            candidate_anchor = ANCHORS[(start + offset) % len(ANCHORS)]
+            candidate = _anchor_rect(candidate_anchor, panel_width, panel_height)
+            candidate_item = dict(item)
+            candidate_item["anchor"] = candidate_anchor
+            candidate_font, _ = _item_font_and_lines(draw, candidate_item, candidate)
+            fitted = _fitted_item_rect(draw, candidate_item, candidate, candidate_font)
+            if not any(_overlap(fitted, prior) for prior in occupied):
+                rect = fitted
+                font = candidate_font
                 break
         if rect is None:
             raise ValueError(f"text item {item.get('id', 'unknown')} has no non-overlapping placement")
-        font, _ = _item_font_and_lines(draw, item, rect)
+        assert font is not None
         render_text_item(draw, item, rect, font, character_bible)
         occupied.append(rect)
 
     encoded = io.BytesIO()
     canvas.convert("RGB").save(encoded, format="PNG", optimize=False, compress_level=9)
     atomic_write_bytes(path, encoded.getvalue())
-    word_count = sum(normalized_word_count(item["content"]) for item in ordered)
-    return {
-        "font_used": str(FONT_PATH),
-        "lettered_path": str(path),
-        "text_count": len(ordered),
-        "word_count": word_count,
-    }
+    return summary
 
 
 def letter_project(project_dir: Path) -> list[Path]:

@@ -1,5 +1,5 @@
-import hashlib
 import json
+import math
 import shutil
 import sys
 import tempfile
@@ -23,7 +23,7 @@ from letter_panels import (  # noqa: E402
 FIXTURES = ROOT / "tests/fixtures"
 
 
-FONT = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+FONT = ROOT / "assets/fonts/ComicNeue-Regular.ttf"
 
 
 def dialogue(content="Keep moving.", priority=1, anchor="top-left"):
@@ -66,6 +66,267 @@ class LetteringTests(unittest.TestCase):
         self.assertEqual(3, normalized_word_count("  one\t two\nthree  "))
         self.assertEqual("Wait... — now!", normalize_content("Wait... — now!"))
 
+    def test_emphasis_parsing(self):
+        from letter_panels import _parse_emphasis
+
+        self.assertEqual(
+            [("Hello ", False), ("world", True), ("!", False)],
+            _parse_emphasis("Hello **world**!"),
+        )
+        self.assertEqual(
+            [("Literal ** missing", False)],
+            _parse_emphasis("Literal ** missing"),
+        )
+        self.assertEqual([("bold", True)], _parse_emphasis("**bold**"))
+        self.assertEqual(
+            [("mixed **stars", False)],
+            _parse_emphasis("mixed **stars"),
+        )
+        self.assertEqual(
+            [("Keep **** literal", False)],
+            _parse_emphasis("Keep **** literal"),
+        )
+        self.assertEqual(
+            [("Keep ** ** literal", False)],
+            _parse_emphasis("Keep ** ** literal"),
+        )
+
+    def test_font_runs_use_exact_fallback_and_preserve_notdef(self):
+        from letter_panels import _font_runs, _font_supports, _load_font
+
+        fallback = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+        unsupported = "\u0378"
+        content = f"AΩBЖC{unsupported}D\nE"
+        runs = _font_runs(content, 32)
+
+        self.assertTrue(_font_supports(FONT, "A"))
+        self.assertFalse(_font_supports(FONT, "Ω"))
+        self.assertTrue(_font_supports(fallback, "Ω"))
+        self.assertTrue(_font_supports(fallback, "Ж"))
+        self.assertFalse(_font_supports(fallback, unsupported))
+        self.assertEqual(content, "".join(text for text, _ in runs))
+        self.assertEqual(
+            [
+                ("A", FONT),
+                ("Ω", fallback),
+                ("B", FONT),
+                ("Ж", fallback),
+                ("C", FONT),
+                (unsupported, fallback),
+                ("D\nE", FONT),
+            ],
+            [(text, Path(font.path)) for text, font in runs],
+        )
+
+        missing_mask = runs[5][1].getmask(unsupported)
+        comparison_mask = runs[5][1].getmask("\u0379")
+        self.assertIsNotNone(missing_mask.getbbox())
+        self.assertEqual(missing_mask.size, comparison_mask.size)
+        self.assertEqual(bytes(missing_mask), bytes(comparison_mask))
+
+        with mock.patch("letter_panels.FONT_PATH", self.root / "missing.ttf"):
+            self.assertEqual(fallback, Path(_load_font(32).path))
+
+    def test_dialogue_renders_complete_emphasis_with_prominent_bold_pixels(self):
+        from letter_panels import _styled_font_runs
+
+        regular = ImageFont.truetype(str(FONT), 48)
+        bold_path = ROOT / "assets/fonts/ComicNeue-Bold.ttf"
+        runs = _styled_font_runs("Stay **LOUD** now", regular)
+        self.assertEqual(["Stay ", "LOUD", " now"], [text for text, _ in runs])
+        self.assertEqual(
+            [FONT, bold_path, FONT],
+            [Path(run_font.path) for _, run_font in runs],
+        )
+
+        def rendered_ink(content):
+            image = Image.new("RGB", (480, 220), (28, 32, 40))
+            draw = ImageDraw.Draw(image)
+            item = dialogue(content)
+            item["tail_target"] = None
+            render_text_item(
+                draw,
+                item,
+                {"x": 20, "y": 20, "width": 440, "height": 180},
+                regular,
+                self.characters,
+            )
+            interior = image.crop((40, 50, 440, 170))
+            return sum(1 for pixel in interior.getdata() if max(pixel) < 128)
+
+        regular_ink = rendered_ink("LOUD")
+        bold_ink = rendered_ink("**LOUD**")
+        self.assertGreater(bold_ink, regular_ink * 1.10)
+
+    def test_styled_layout_wraps_visible_runs_and_centers_each_line(self):
+        from letter_panels import _layout_styled_text
+
+        image = Image.new("RGB", (600, 300), "white")
+        draw = ImageDraw.Draw(image)
+        regular = ImageFont.truetype(str(FONT), 48)
+        bold_path = ROOT / "assets/fonts/ComicNeue-Bold.ttf"
+        bold = ImageFont.truetype(str(bold_path), 48)
+        fallback_path = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+        fallback = ImageFont.truetype(str(fallback_path), 48)
+
+        content = "AA **wwww**"
+        regular_visible_width = draw.textlength("AA wwww", font=regular)
+        mixed_visible_width = (
+            draw.textlength("AA ", font=regular)
+            + draw.textlength("wwww", font=bold)
+        )
+        literal_marker_width = draw.textlength(content, font=regular)
+        self.assertLess(regular_visible_width, mixed_visible_width)
+        self.assertLess(mixed_visible_width, literal_marker_width)
+
+        marker_free = _layout_styled_text(
+            draw,
+            content,
+            regular,
+            (mixed_visible_width + literal_marker_width) / 2,
+        )
+        self.assertIsNotNone(marker_free)
+        self.assertEqual(
+            ["AA wwww"],
+            ["".join(text for text, _ in line.runs) for line in marker_free.lines],
+        )
+        self.assertAlmostEqual(mixed_visible_width, marker_free.lines[0].width)
+
+        wrapped = _layout_styled_text(
+            draw,
+            content,
+            regular,
+            (regular_visible_width + mixed_visible_width) / 2,
+        )
+        self.assertIsNotNone(wrapped)
+        self.assertEqual(
+            ["AA", "wwww"],
+            ["".join(text for text, _ in line.runs) for line in wrapped.lines],
+        )
+        self.assertEqual(bold_path, Path(wrapped.lines[1].runs[0][1].path))
+        self.assertAlmostEqual(
+            draw.textlength("wwww", font=bold),
+            wrapped.lines[1].width,
+        )
+        wrapped_maximum = (regular_visible_width + mixed_visible_width) / 2
+        self.assertTrue(all(line.width <= wrapped_maximum for line in wrapped.lines))
+
+        regular_fallback_width = draw.textlength("AA ΩΩ", font=regular)
+        mixed_fallback_width = (
+            draw.textlength("AA ", font=regular)
+            + draw.textlength("ΩΩ", font=fallback)
+        )
+        self.assertLess(regular_fallback_width, mixed_fallback_width)
+        fallback_maximum = (regular_fallback_width + mixed_fallback_width) / 2
+        fallback_wrapped = _layout_styled_text(
+            draw,
+            "AA ΩΩ",
+            regular,
+            fallback_maximum,
+        )
+        self.assertIsNotNone(fallback_wrapped)
+        self.assertEqual(
+            ["AA", "ΩΩ"],
+            ["".join(text for text, _ in line.runs) for line in fallback_wrapped.lines],
+        )
+        self.assertEqual(fallback_path, Path(fallback_wrapped.lines[1].runs[0][1].path))
+        self.assertAlmostEqual(
+            draw.textlength("ΩΩ", font=fallback),
+            fallback_wrapped.lines[1].width,
+        )
+        self.assertTrue(all(line.width <= fallback_maximum for line in fallback_wrapped.lines))
+
+        word_width = max(
+            draw.textlength("BOLD", font=bold),
+            draw.textlength("WORDS", font=bold),
+        )
+        spanning = _layout_styled_text(
+            draw,
+            "**BOLD WORDS**",
+            regular,
+            word_width + 1,
+        )
+        self.assertIsNotNone(spanning)
+        self.assertEqual(
+            ["BOLD", "WORDS"],
+            ["".join(text for text, _ in line.runs) for line in spanning.lines],
+        )
+        self.assertTrue(
+            all(Path(run_font.path) == bold_path for line in spanning.lines for _, run_font in line.runs)
+        )
+        self.assertTrue(all(line.width <= word_width + 1 for line in spanning.lines))
+
+        metrics = _layout_styled_text(draw, "AΩ**B**", regular, 1000)
+        self.assertIsNotNone(metrics)
+        expected_boxes = (
+            draw.textbbox((0, 0), "A", font=regular, anchor="ls"),
+            draw.textbbox((0, 0), "Ω", font=fallback, anchor="ls"),
+            draw.textbbox((0, 0), "B", font=bold, anchor="ls"),
+        )
+        self.assertEqual(min(box[1] for box in expected_boxes), metrics.lines[0].top)
+        self.assertEqual(max(box[3] for box in expected_boxes), metrics.lines[0].bottom)
+        self.assertEqual(
+            metrics.lines[0].bottom - metrics.lines[0].top,
+            metrics.lines[0].height,
+        )
+
+        centered_image = Image.new("RGB", (500, 260), (28, 32, 40))
+        centered_draw = ImageDraw.Draw(centered_image)
+        centered_item = dialogue("I\n**WIDE**")
+        centered_item["tail_target"] = None
+        rect = {"x": 20, "y": 20, "width": 460, "height": 220}
+        centered_layout = _layout_styled_text(
+            centered_draw,
+            centered_item["content"],
+            regular,
+            rect["width"] - 48,
+        )
+        self.assertIsNotNone(centered_layout)
+        self.assertEqual(
+            ["I", "WIDE"],
+            ["".join(text for text, _ in line.runs) for line in centered_layout.lines],
+        )
+
+        starts = []
+
+        def capture_line_start(_draw, _runs, position, _fill):
+            starts.append(position)
+
+        with mock.patch("letter_panels._draw_font_runs", side_effect=capture_line_start):
+            render_text_item(
+                centered_draw,
+                centered_item,
+                rect,
+                regular,
+                self.characters,
+            )
+        expected_center = rect["x"] + rect["width"] / 2
+        self.assertEqual(len(centered_layout.lines), len(starts))
+        for line, (line_x, _) in zip(centered_layout.lines, starts):
+            self.assertAlmostEqual(expected_center - line.width / 2, line_x, delta=0.5)
+
+        centered_image = Image.new("RGB", (500, 260), (28, 32, 40))
+        centered_draw = ImageDraw.Draw(centered_image)
+        render_text_item(
+            centered_draw,
+            centered_item,
+            rect,
+            regular,
+            self.characters,
+        )
+        line_top = rect["y"] + max(24, (rect["height"] - centered_layout.height) / 2)
+        for line in centered_layout.lines:
+            points = [
+                (x, y)
+                for y in range(max(0, int(line_top) - 2), min(centered_image.height, int(line_top + line.height) + 3))
+                for x in range(rect["x"] + 24, rect["x"] + rect["width"] - 24)
+                if max(centered_image.getpixel((x, y))) < 128
+            ]
+            self.assertTrue(points)
+            ink_center = (min(x for x, _ in points) + max(x for x, _ in points)) / 2
+            self.assertAlmostEqual(expected_center, ink_center, delta=6)
+            line_top += line.height + 6
+
     def test_letter_panel_produces_valid_png_and_summary(self):
         result = letter_panel(
             str(self.panel), 800, 1000,
@@ -77,6 +338,8 @@ class LetteringTests(unittest.TestCase):
             image.load()
         self.assertEqual(str(self.panel), result["lettered_path"])
         self.assertEqual(3, result["text_count"])
+        self.assertEqual(2, result["rendered_text_count"])
+        self.assertEqual(1, result["sfx_count"])
         self.assertEqual(10, result["word_count"])
         self.assertEqual(str(FONT), result["font_used"])
 
@@ -89,26 +352,165 @@ class LetteringTests(unittest.TestCase):
 
         with mock.patch("letter_panels.render_text_item", side_effect=observe):
             letter_panel(str(self.panel), 800, 1000, items, self.characters)
-        self.assertEqual(["FIRST", "SECOND", "THREE"], seen)
+        self.assertEqual(["FIRST", "SECOND"], seen)
 
-    def test_dialogue_has_white_box_dark_stroke_and_tail(self):
+    def test_dialogue_has_white_oval_dark_stroke_and_tail(self):
         letter_panel(str(self.panel), 800, 1000, [dialogue()], self.characters)
         image = Image.open(self.panel).convert("RGB")
         self.assertGreater(sum(1 for pixel in image.getdata() if all(channel > 240 for channel in pixel)), 1000)
         self.assertNotEqual((28, 32, 40), image.getpixel((600, 700)))
         self.assertTrue(any(max(image.getpixel((x, 40))) < 80 for x in range(32, 370)))
 
-    def test_sfx_is_deterministic_and_impact_styled(self):
-        first = self.panel.read_bytes()
-        letter_panel(str(self.panel), 800, 1000, [sfx()], self.characters)
-        digest_one = hashlib.sha256(self.panel.read_bytes()).hexdigest()
-        self.panel.write_bytes(first)
-        letter_panel(str(self.panel), 800, 1000, [sfx()], self.characters)
-        self.assertEqual(digest_one, hashlib.sha256(self.panel.read_bytes()).hexdigest())
-        image = Image.open(self.panel).convert("RGB")
-        crop = image.crop((430, 350, 770, 650))
-        self.assertIsNotNone(crop.getbbox())
-        self.assertNotEqual((28, 32, 40), crop.getpixel((170, 150)))
+    def test_dialogue_tail_attachment_has_no_internal_seam(self):
+        from letter_panels import _ellipse_tail_polygon
+
+        image = Image.new("RGB", (240, 240), (96, 96, 96))
+        draw = ImageDraw.Draw(image)
+        rect = {"x": 40, "y": 30, "width": 120, "height": 70}
+        item = dialogue("Hi")
+        item["tail_target"] = [0.8, 0.8]
+        base_one, base_two, _ = _ellipse_tail_polygon(rect, item["tail_target"], 240, 240)
+        attachment = tuple(round((first + second) / 2) for first, second in zip(base_one, base_two))
+
+        render_text_item(
+            draw, item, rect, ImageFont.truetype(str(FONT), 24), self.characters
+        )
+
+        self.assertEqual((255, 255, 255), image.getpixel(attachment))
+
+    def test_dialogue_uses_adaptive_oval_and_boundary_tail_geometry(self):
+        from letter_panels import (
+            _ellipse_tail_polygon,
+            _fitted_item_rect,
+            _item_font_and_lines,
+            _layout_styled_text,
+        )
+
+        image = Image.new("RGB", (800, 1000), (28, 32, 40))
+        draw = ImageDraw.Draw(image)
+        maximum = {"x": 32, "y": 40, "width": 336, "height": 300}
+        short = dialogue("Go!")
+        short_font, _ = _item_font_and_lines(draw, short, maximum)
+        short_rect = _fitted_item_rect(draw, short, maximum, short_font)
+        short_layout = _layout_styled_text(
+            draw, short["content"], short_font, maximum["width"] - 48
+        )
+        self.assertIsNotNone(short_layout)
+        long = dialogue("The service bridge is collapsing beneath us now!")
+        long_font, _ = _item_font_and_lines(draw, long, maximum)
+        long_rect = _fitted_item_rect(draw, long, maximum, long_font)
+
+        self.assertLess(short_rect["width"], maximum["width"])
+        self.assertLess(short_rect["height"], maximum["height"])
+        self.assertGreaterEqual(short_rect["height"], short_layout.height + 48)
+        self.assertGreater(long_rect["width"] * long_rect["height"], short_rect["width"] * short_rect["height"])
+        self.assertGreaterEqual(short_rect["x"], maximum["x"])
+        self.assertGreaterEqual(short_rect["y"], maximum["y"])
+
+        base_one, base_two, target = _ellipse_tail_polygon(
+            short_rect, [-0.25, 1.25], 800, 1000
+        )
+        self.assertEqual((0, 999), target)
+        attachment = (
+            (base_one[0] + base_two[0]) / 2,
+            (base_one[1] + base_two[1]) / 2,
+        )
+        center = (
+            short_rect["x"] + short_rect["width"] / 2,
+            short_rect["y"] + short_rect["height"] / 2,
+        )
+        radii = (short_rect["width"] / 2, short_rect["height"] / 2)
+        ellipse_value = (
+            ((attachment[0] - center[0]) / radii[0]) ** 2
+            + ((attachment[1] - center[1]) / radii[1]) ** 2
+        )
+        self.assertAlmostEqual(1.0, ellipse_value, delta=0.03)
+        delta_x, delta_y = target[0] - center[0], target[1] - center[1]
+        scale = 1 / math.sqrt((delta_x / radii[0]) ** 2 + (delta_y / radii[1]) ** 2)
+        expected_attachment = (center[0] + delta_x * scale, center[1] + delta_y * scale)
+        self.assertAlmostEqual(expected_attachment[0], attachment[0], delta=1.0)
+        self.assertAlmostEqual(expected_attachment[1], attachment[1], delta=1.0)
+        self.assertNotIn(center, (base_one, base_two, target))
+
+        calls = []
+        original_line = draw.line
+        original_polygon = draw.polygon
+        original_ellipse = draw.ellipse
+
+        def record_line(*args, **kwargs):
+            calls.append("line")
+            return original_line(*args, **kwargs)
+
+        def record_polygon(*args, **kwargs):
+            calls.append("polygon")
+            return original_polygon(*args, **kwargs)
+
+        def record_ellipse(*args, **kwargs):
+            calls.append("ellipse")
+            return original_ellipse(*args, **kwargs)
+
+        with (
+            mock.patch.object(draw, "line", side_effect=record_line),
+            mock.patch.object(draw, "polygon", side_effect=record_polygon),
+            mock.patch.object(draw, "ellipse", side_effect=record_ellipse),
+        ):
+            render_text_item(draw, short, short_rect, short_font, self.characters)
+
+        self.assertNotIn("line", calls)
+        self.assertIn("polygon", calls)
+        self.assertIn("ellipse", calls)
+        self.assertLess(calls.index("polygon"), calls.index("ellipse"))
+        self.assertEqual((28, 32, 40), image.getpixel((short_rect["x"] + 2, short_rect["y"] + 2)))
+        self.assertGreater(min(image.getpixel((short_rect["x"] + short_rect["width"] // 2, short_rect["y"] + 6))), 220)
+
+    def test_sfx_is_validated_counted_and_byte_exact_noop(self):
+        before = self.panel.read_bytes()
+        result = letter_panel(str(self.panel), 800, 1000, [sfx()], self.characters)
+
+        self.assertEqual(before, self.panel.read_bytes())
+        self.assertEqual(1, result["text_count"])
+        self.assertEqual(0, result["rendered_text_count"])
+        self.assertEqual(1, result["sfx_count"])
+        self.assertEqual(1, result["word_count"])
+
+        invalid = sfx()
+        invalid["anchor"] = "outside-panel"
+        with self.assertRaisesRegex(ValueError, "unknown anchor"):
+            letter_panel(str(self.panel), 800, 1000, [invalid], self.characters)
+        self.assertEqual(before, self.panel.read_bytes())
+
+    def test_sfx_never_reaches_placement_or_render(self):
+        with (
+            mock.patch("letter_panels._anchor_rect", side_effect=AssertionError("SFX placement attempted")) as placement,
+            mock.patch("letter_panels.render_text_item") as render,
+        ):
+            result = letter_panel(str(self.panel), 800, 1000, [sfx()], self.characters)
+
+        placement.assert_not_called()
+        render.assert_not_called()
+        self.assertEqual(0, result["rendered_text_count"])
+
+    def test_sfx_does_not_change_or_reserve_mixed_lettering(self):
+        without_sfx = self.root / "without-sfx.png"
+        with_sfx = self.root / "with-sfx.png"
+        shutil.copy2(self.panel, without_sfx)
+        shutil.copy2(self.panel, with_sfx)
+        spoken = dialogue("Same placement.", priority=2, anchor="middle-right")
+
+        plain_result = letter_panel(
+            str(without_sfx), 800, 1000, [spoken], self.characters
+        )
+        mixed_result = letter_panel(
+            str(with_sfx), 800, 1000,
+            [sfx("KRAK!", priority=1, anchor="middle-right"), spoken],
+            self.characters,
+        )
+
+        self.assertEqual(without_sfx.read_bytes(), with_sfx.read_bytes())
+        self.assertEqual(1, plain_result["rendered_text_count"])
+        self.assertEqual(1, mixed_result["rendered_text_count"])
+        self.assertEqual(1, mixed_result["sfx_count"])
+        self.assertEqual(2, mixed_result["text_count"])
 
     def test_caption_is_drawn_at_top_as_overlay(self):
         letter_panel(str(self.panel), 800, 1000, [caption()], self.characters)
@@ -117,6 +519,72 @@ class LetteringTests(unittest.TestCase):
         bottom = ImageChops.difference(image.crop((0, 680, 800, 1000)), Image.new("RGB", (800, 320), (28, 32, 40)))
         self.assertIsNotNone(top.getbbox())
         self.assertIsNone(bottom.getbbox())
+
+    def test_caption_is_compact_light_strip_fitted_at_top(self):
+        from letter_panels import _fitted_item_rect, _item_font_and_lines
+
+        image = Image.new("RGB", (800, 1000), (28, 32, 40))
+        draw = ImageDraw.Draw(image)
+        item = caption("A quiet beat.")
+        maximum = {"x": 32, "y": 40, "width": 336, "height": 300}
+        font, _ = _item_font_and_lines(draw, item, maximum)
+        fitted = _fitted_item_rect(draw, item, maximum, font)
+
+        self.assertEqual((maximum["x"], maximum["y"]), (fitted["x"], fitted["y"]))
+        self.assertLess(fitted["width"], maximum["width"])
+        self.assertLess(fitted["height"], maximum["height"] // 2)
+
+        calls = []
+        original_rectangle = draw.rectangle
+        original_rounded = draw.rounded_rectangle
+
+        def record_rectangle(*args, **kwargs):
+            calls.append("rectangle")
+            return original_rectangle(*args, **kwargs)
+
+        def record_rounded(*args, **kwargs):
+            calls.append("rounded_rectangle")
+            return original_rounded(*args, **kwargs)
+
+        with (
+            mock.patch.object(draw, "rectangle", side_effect=record_rectangle),
+            mock.patch.object(draw, "rounded_rectangle", side_effect=record_rounded),
+        ):
+            render_text_item(draw, item, fitted, font, self.characters)
+
+        self.assertEqual(["rectangle"], calls)
+        self.assertTrue(
+            all(channel > 230 for channel in image.getpixel((fitted["x"] + 4, fitted["y"] + 4)))
+        )
+
+    def test_caption_uses_per_character_noto_fallback(self):
+        from letter_panels import _fitted_item_rect, _item_font_and_lines
+
+        image = Image.new("RGB", (800, 1000), (28, 32, 40))
+        draw = ImageDraw.Draw(image)
+        unsupported = "\u0378"
+        item = caption(f"A ΩЖ {unsupported}")
+        maximum = {"x": 32, "y": 40, "width": 336, "height": 300}
+        font, _ = _item_font_and_lines(draw, item, maximum)
+        fitted = _fitted_item_rect(draw, item, maximum, font)
+        captured_runs = []
+
+        def capture_runs(_draw, runs, _position, _fill):
+            captured_runs.extend(runs)
+
+        with mock.patch("letter_panels._draw_font_runs", side_effect=capture_runs):
+            render_text_item(draw, item, fitted, font, self.characters)
+
+        self.assertEqual(item["content"], "".join(text for text, _ in captured_runs))
+        self.assertEqual(
+            [
+                ROOT / "assets/fonts/ComicNeue-Regular.ttf",
+                ROOT / "assets/fonts/NotoSans-Regular.ttf",
+                ROOT / "assets/fonts/ComicNeue-Regular.ttf",
+                ROOT / "assets/fonts/NotoSans-Regular.ttf",
+            ],
+            [Path(run_font.path) for _, run_font in captured_runs],
+        )
 
     def test_all_anchor_drawing_stays_inside_panel_boundary(self):
         image = Image.new("RGB", (512, 512), "black")

@@ -125,7 +125,17 @@ class ResumeTests(unittest.TestCase):
         if stage == "generation":
             visual_panels = []
             for panel in panels:
-                item = deepcopy(panel); item.pop("text", None); visual_panels.append(item)
+                item = deepcopy(panel)
+                sfx_items = [
+                    text_item
+                    for text_item in item.get("text", [])
+                    if text_item.get("kind") == "sfx"
+                ]
+                if sfx_items:
+                    item["text"] = sfx_items
+                else:
+                    item.pop("text", None)
+                visual_panels.append(item)
             files = [self.project / "prompts/panels/p01-01.txt", self.project / "references/characters/mira.png"]
             return [visual_panels, characters, manifest["capability"]], files
         if stage == "lettering":
@@ -160,6 +170,41 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotEqual(first, stage_cache_key("planning", [{"a": 1, "b": 3}], [], "1"))
 
+    def test_stale_v1_lettering_cache_reruns_lettering_onward_only(self):
+        canonical_inputs, files = self._stage_material("lettering")
+        cache = read_json(self.project / "logs/stage-cache.json")
+        cache["stages"]["lettering"]["key"] = stage_cache_key(
+            "lettering", canonical_inputs, files, "1"
+        )
+        atomic_write_json(self.project / "logs/stage-cache.json", cache)
+
+        manifest = read_json(self.project / "project.json")
+        manifest["stage_versions"]["lettering"] = "2"
+        atomic_write_json(self.project / "project.json", manifest)
+        raw_before = (self.project / "panels/raw/p01-01.png").read_bytes()
+        clean_before = (self.project / "panels/clean/p01-01.png").read_bytes()
+
+        actions = build_resume_plan(self.project)
+
+        stage_actions = [
+            (action.stage, action.action)
+            for action in actions
+            if action.artifact == "stage"
+        ]
+        self.assertEqual(
+            [
+                ("planning", "reuse"),
+                ("storyboard", "reuse"),
+                ("generation", "reuse"),
+                ("lettering", "rerun"),
+                ("composition", "rerun"),
+                ("export", "rerun"),
+            ],
+            stage_actions,
+        )
+        self.assertEqual(raw_before, (self.project / "panels/raw/p01-01.png").read_bytes())
+        self.assertEqual(clean_before, (self.project / "panels/clean/p01-01.png").read_bytes())
+
     def test_noop_resume_does_not_write_any_file(self):
         before = {p.relative_to(self.project): (p.stat().st_mtime_ns, sha256_file(p)) for p in self.project.rglob("*") if p.is_file()}
         actions = build_resume_plan(self.project)
@@ -183,6 +228,36 @@ class ResumeTests(unittest.TestCase):
         by_stage = {action.stage: action.action for action in actions if action.artifact == "stage"}
         self.assertEqual("reuse", by_stage["generation"])
         self.assertEqual(["lettering", "composition", "export"], [stage for stage in STAGES if by_stage[stage] == "rerun"])
+        self.assertEqual(raw_hash, sha256_file(self.project / "panels/raw/p01-01.png"))
+        self.assertEqual(clean_hash, sha256_file(self.project / "panels/clean/p01-01.png"))
+
+    def test_sfx_change_invalidates_generation_onward(self):
+        storyboard = read_json(self.project / "plan/storyboard.json")
+        storyboard["pages"][0]["panels"][0]["text"] = [{
+            "id": "p01-01-sfx", "kind": "sfx", "content": "KRAK!",
+        }]
+        atomic_write_json(self.project / "plan/storyboard.json", storyboard)
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"]["storyboard"] = self._descriptor("plan/storyboard.json")
+        atomic_write_json(self.project / "project.json", manifest)
+        self._write_cache_snapshot()
+        baseline = build_resume_plan(self.project)
+        self.assertTrue(all(action.action == "reuse" for action in baseline), baseline)
+        raw_hash = sha256_file(self.project / "panels/raw/p01-01.png")
+        clean_hash = sha256_file(self.project / "panels/clean/p01-01.png")
+
+        storyboard["pages"][0]["panels"][0]["text"][0]["content"] = "BOOM!"
+        atomic_write_json(self.project / "plan/storyboard.json", storyboard)
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"]["storyboard"] = self._descriptor("plan/storyboard.json")
+        atomic_write_json(self.project / "project.json", manifest)
+
+        actions = build_resume_plan(self.project)
+
+        by_stage = {action.stage: action.action for action in actions if action.artifact == "stage"}
+        self.assertEqual("reuse", by_stage["storyboard"])
+        self.assertEqual("regenerate", by_stage["generation"])
+        self.assertTrue(all(by_stage[stage] == "rerun" for stage in ("lettering", "composition", "export")))
         self.assertEqual(raw_hash, sha256_file(self.project / "panels/raw/p01-01.png"))
         self.assertEqual(clean_hash, sha256_file(self.project / "panels/clean/p01-01.png"))
 

@@ -33,10 +33,13 @@ reporting to the bundled Python scripts.
    semantic artifact before advancing its status.
 4. Detect image capability from tools exposed in the current agent session. Do not ask
    deterministic scripts to discover or call an image provider.
-5. Generate canonical references and panels into attempt paths, inspect them visually,
-   record all seven QA checks, and selectively repair only failures within budget.
-6. Promote accepted attempts, letter panels, compose pages, export PDF, render the QA
-   report, validate final integrity, and transition to the honest terminal status.
+5. Generate canonical references and panels into attempt paths. Require the image model
+   to draw each exact storyboard SFX in the artwork, inspect every result visually, record
+   all seven QA checks, and selectively repair only failures within budget.
+6. Promote accepted attempts; deterministically letter dialogue and captions while
+   validating and counting exact storyboard SFX without drawing it in Pillow; compose
+   pages, export PDF, render the QA report, validate final integrity, and transition to
+   the honest terminal status.
 7. Return status, counts, warnings, and clickable project output paths.
 
 ## Deterministic command route

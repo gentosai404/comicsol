@@ -16,12 +16,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image
+from PIL import Image, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "templates"
-FONT_PATH = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+FONT_PATH_COMIC_REGULAR = ROOT / "assets/fonts/ComicNeue-Regular.ttf"
+FONT_PATH_COMIC_BOLD = ROOT / "assets/fonts/ComicNeue-Bold.ttf"
+FONT_PATH_FALLBACK = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+FONT_PATH = FONT_PATH_COMIC_REGULAR
 PAGE_WIDTH = 1600
 PAGE_HEIGHT = 2400
 MARGIN = 64
@@ -541,7 +544,16 @@ def _resume_stage_material(
         visual_panels = []
         for panel in panels:
             visual_panel = dict(panel)
-            visual_panel.pop("text", None)
+            text_items = panel.get("text", [])
+            sfx_items = [
+                dict(text_item)
+                for text_item in text_items
+                if isinstance(text_item, dict) and text_item.get("kind") == "sfx"
+            ] if isinstance(text_items, list) else []
+            if sfx_items:
+                visual_panel["text"] = sfx_items
+            else:
+                visual_panel.pop("text", None)
             visual_panels.append(visual_panel)
         prompt_paths = [f"prompts/panels/{panel_id}.txt" for panel_id in panel_ids]
         reference_paths: list[str] = []
@@ -885,19 +897,28 @@ def doctor(output_root: Path) -> tuple[bool, list[str]]:
 
     try:
         import PIL
-        from PIL import ImageFont
 
         if PIL.__version__ == "11.3.0":
             messages.append("PASS Pillow 11.3.0")
         else:
             healthy = False
             messages.append(f"FAIL Pillow 11.3.0 required; found {PIL.__version__}")
-
-        ImageFont.truetype(str(FONT_PATH), 42)
-        messages.append("PASS font loads at 42px")
     except Exception as error:
         healthy = False
-        messages.append(f"FAIL font/Pillow check: {type(error).__name__}: {error}")
+        messages.append(f"FAIL Pillow check: {type(error).__name__}: {error}")
+
+    font_checks = (
+        ("Comic Neue Regular", FONT_PATH_COMIC_REGULAR),
+        ("Comic Neue Bold", FONT_PATH_COMIC_BOLD),
+        ("Noto Sans fallback", FONT_PATH_FALLBACK),
+    )
+    for label, path in font_checks:
+        try:
+            ImageFont.truetype(str(path), 42)
+            messages.append(f"PASS font {label} loads at 42px")
+        except Exception as error:
+            healthy = False
+            messages.append(f"FAIL font {label} at 42px: {type(error).__name__}: {error}")
 
     template_names = (
         "manifest.json",

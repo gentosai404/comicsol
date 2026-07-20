@@ -62,10 +62,11 @@ semantic content, then `comic_sol.py transition PROJECT_DIR PLANNED`.
 
 ### 3. Script and storyboard
 
-Write dialogue, captions, SFX, pacing, camera, light, continuity, fixed layouts, and
-absolute rectangles to `plan/storyboard.json`. Transition through `SCRIPTED`, validate
-with `validate_project.py PROJECT_DIR --stage storyboard`, then transition to
-`STORYBOARDED`.
+Write dialogue, captions, exact SFX, pacing, camera, light, continuity, fixed layouts,
+and absolute rectangles to `plan/storyboard.json`. SFX is authored artwork content;
+dialogue and captions are deterministic lettering content. Transition through
+`SCRIPTED`, validate with `validate_project.py PROJECT_DIR --stage storyboard`, then
+transition to `STORYBOARDED`.
 
 ### 4. Detect image capability
 
@@ -81,22 +82,28 @@ scene reference only at the creative threshold. Preserve prompts and transition 
 
 ### 6. Generate panels
 
-Write each ordered prompt, invoke the selected agent tool into an attempt file, then run
-`comic_sol.py record-attempt`. Confirm readable raster output and at least 512 px in both
-dimensions. Never promote before visual QA.
+Write each ordered prompt, requiring the image model to integrate every exact authored
+SFX once and prohibiting generated dialogue, captions, speech bubbles, logos,
+signatures, watermarks, or un-authored SFX. Invoke the selected agent tool into an
+attempt file, then run `comic_sol.py record-attempt`. Confirm readable raster output and
+at least 512 px in both dimensions. Never promote before visual QA.
 
 ### 7. Visual QA and selective repair
 
-Apply all seven checks from the QA reference with evidence. Retry only failed panels,
-retain every attempt, and use one correction clause. Use `comic_sol.py promote-attempt`
-for accepted images and `comic_sol.py override-panel` only for an explicit allowed user
-override. Validate with `validate_project.py PROJECT_DIR --stage panels`, then transition
-through `PANELS_READY` and `QA_READY`.
+Apply all seven checks from the QA reference with evidence, including exact SFX spelling,
+count, and authorization. Retry only failed panels, retain every attempt, and use one
+correction clause. Use `comic_sol.py promote-attempt` for accepted images and
+`comic_sol.py override-panel` only for an explicit allowed user override. Validate with
+`validate_project.py PROJECT_DIR --stage panels`, then transition through `PANELS_READY`
+and `QA_READY`.
 
 ### 8. Normalize and letter
 
 Prepare clean panel files without semantic edits. Run `letter_panels.py PANEL_DIR
---output-root PATH`; inspect text placement and transition to `LETTERED`.
+--output-root PATH`; inspect text placement and its summary. `text_count` is the
+backward-compatible authored total, `rendered_text_count` counts rendered dialogue and
+captions, and `sfx_count` counts validated authored SFX. Pillow must make no placement,
+overlap reservation, or pixel change for SFX. Transition to `LETTERED`.
 
 ### 9. Compose and export
 
@@ -124,7 +131,8 @@ The success path is:
 - Safety refusal: do not evade; record only a sanitized category and transition `BLOCKED`.
 - Quota/transient failure: permit one bounded repeat, then preserve and block.
 - Invalid image: retain the attempt and selectively retry within budget.
-- Visual QA failure: repair only the failed panel; passing hashes remain unchanged.
+- Visual QA failure, including missing, misspelled, duplicated, or unauthorized SFX:
+  repair only the failed panel; passing hashes remain unchanged.
 - Lettering/glyph overflow: preserve images and revise supported text downstream only.
 - Missing/stale/corrupt artifact: invalidate its earliest owning stage and downstream.
 - Composition/PDF failure: retain lettered panels and rerun only deterministic outputs.

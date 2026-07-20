@@ -558,6 +558,44 @@ class SkillContractTests(unittest.TestCase):
         ):
             self.assertIn(phrase, text)
 
+    def test_hybrid_sfx_prompt_lettering_and_qa_contract(self):
+        skill = self.skill_text().lower()
+        creative = (ROOT / "references/creative-direction.md").read_text("utf-8").lower()
+        visual = (ROOT / "references/visual-qa.md").read_text("utf-8").lower()
+        schemas = (ROOT / "references/schemas.md").read_text("utf-8").lower()
+        workflow = (ROOT / "references/workflow.md").read_text("utf-8").lower()
+
+        self.assertEqual(
+            [
+                "character-identity", "anatomy", "action", "composition",
+                "continuity", "text-free", "technical",
+            ],
+            re.findall(r"^\d+\. `([^`]+)`:", visual, re.MULTILINE),
+        )
+        for phrase in (
+            "exact storyboard-authored sfx",
+            "dynamic motion/action typography",
+            "no generated dialogue, captions, or speech bubbles",
+            "if no sfx is authored, prohibit generated sfx",
+        ):
+            self.assertIn(phrase, creative)
+        for phrase in (
+            "exact storyboard-authored sfx is allowed and required",
+            "missing, misspelled, duplicated, or unauthorized sfx",
+            "dialogue", "caption", "speech bubbles", "logos", "signatures", "watermarks",
+        ):
+            self.assertIn(phrase, visual)
+        self.assertIn(
+            "pillow neither draws sfx nor allocates a placement rectangle or overlap reservation",
+            schemas,
+        )
+        self.assertNotIn("no dialogue, captions, sfx", schemas)
+        for phrase in ("text_count", "rendered_text_count", "sfx_count"):
+            self.assertIn(phrase, schemas)
+            self.assertIn(phrase, workflow)
+        self.assertIn("exact storyboard sfx", skill)
+        self.assertIn("image model", skill)
+
     def test_all_deterministic_cli_commands_are_routed(self):
         text = self.skill_text()
         commands = (
@@ -631,3 +669,13 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("2026 The Comic Sol Authors", license_text)
         self.assertIn("SIL Open Font License 1.1", assets)
         self.assertIn("does not replace the font license", assets)
+
+    def test_readme_documents_hybrid_lettering_capabilities_and_limits(self):
+        readme = self.readme()
+        for phrase in (
+            "Comic Neue Regular", "Comic Neue Bold", "per-character",
+            "Greek and Cyrillic", ".notdef", "**bold**", "adaptive oval",
+            "compact light caption", "image model", "visual QA", "CJK",
+            "fallback boxes",
+        ):
+            self.assertIn(phrase, readme)

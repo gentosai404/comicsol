@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from PIL import ImageFont
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -28,6 +30,7 @@ from comic_sol import (  # noqa: E402
     transition,
 )
 import comic_sol  # noqa: E402
+import letter_panels  # noqa: E402
 
 
 class ManifestTests(unittest.TestCase):
@@ -37,6 +40,22 @@ class ManifestTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary_directory.cleanup()
+
+    def test_template_uses_lettering_cache_version_two_only(self):
+        manifest = read_json(ROOT / "templates/manifest.json")
+
+        self.assertEqual("1.0", manifest["schema_version"])
+        self.assertEqual(
+            {
+                "composition": "1",
+                "export": "1",
+                "generation": "1",
+                "lettering": "2",
+                "planning": "1",
+                "storyboard": "1",
+            },
+            manifest["stage_versions"],
+        )
 
     def test_init_preserves_source_and_creates_complete_skeleton(self):
         request = {"mode": "short_prompt", "language": "en"}
@@ -231,9 +250,69 @@ class ManifestTests(unittest.TestCase):
     def test_doctor_checks_local_runtime_and_defers_image_capability(self):
         healthy, messages = doctor(self.root / "doctor-output")
         self.assertTrue(healthy, messages)
-        for label in ("Python 3.11", "Pillow 11.3.0", "font", "templates", "output root"):
+        for label in (
+            "Python 3.11",
+            "Pillow 11.3.0",
+            "font Comic Neue Regular",
+            "font Comic Neue Bold",
+            "font Noto Sans fallback",
+            "templates",
+            "output root",
+        ):
             self.assertTrue(any(message.startswith("PASS") and label in message for message in messages), label)
         self.assertIn("INFO image capability: inspect in agent session", messages)
+
+    def test_doctor_reports_each_font_when_one_face_fails(self):
+        real_truetype = ImageFont.truetype
+
+        def fail_bold_only(font, size, *args, **kwargs):
+            if Path(font).name == "ComicNeue-Bold.ttf":
+                raise OSError("simulated bold font failure")
+            return real_truetype(font, size, *args, **kwargs)
+
+        with mock.patch.object(ImageFont, "truetype", side_effect=fail_bold_only):
+            healthy, messages = doctor(self.root / "doctor-output")
+
+        self.assertFalse(healthy)
+        self.assertTrue(any(message.startswith("PASS font Comic Neue Regular") for message in messages))
+        self.assertTrue(any(message.startswith("FAIL font Comic Neue Bold") for message in messages))
+        self.assertTrue(any(message.startswith("PASS font Noto Sans fallback") for message in messages))
+
+    def test_font_paths_expose_comic_neue_and_noto_fallback(self):
+        regular = ROOT / "assets/fonts/ComicNeue-Regular.ttf"
+        bold = ROOT / "assets/fonts/ComicNeue-Bold.ttf"
+        fallback = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+
+        self.assertEqual(regular, getattr(comic_sol, "FONT_PATH_COMIC_REGULAR", None))
+        self.assertEqual(bold, getattr(comic_sol, "FONT_PATH_COMIC_BOLD", None))
+        self.assertEqual(fallback, getattr(comic_sol, "FONT_PATH_FALLBACK", None))
+        self.assertEqual(regular, letter_panels.FONT_PATH)
+        self.assertEqual(bold, getattr(letter_panels, "FONT_PATH_BOLD", None))
+        self.assertEqual(fallback, getattr(letter_panels, "FONT_PATH_FALLBACK", None))
+        arguments = letter_panels._build_parser().parse_args(
+            [str(self.root), "--output-root", str(self.root / "output")]
+        )
+        self.assertEqual(regular, arguments.font)
+
+    def test_bundled_comic_neue_faces_load_at_42px(self):
+        faces = {
+            "ComicNeue-Regular.ttf": (
+                "a0ee5a37c8b27c4db0700137d928598b1e23b0089e1546a8961909176b779360",
+                ("Comic Neue", "Regular"),
+            ),
+            "ComicNeue-Bold.ttf": (
+                "3e7e5fccfd7e0788f317b43312151c1bd5cf058c9697a8d83eac3939050bd61e",
+                ("Comic Neue", "Bold"),
+            ),
+        }
+        for filename, (expected_sha256, expected_name) in faces.items():
+            with self.subTest(filename=filename):
+                path = ROOT / "assets/fonts" / filename
+                self.assertTrue(path.is_file(), path)
+                self.assertEqual(expected_sha256, hashlib.sha256(path.read_bytes()).hexdigest())
+                font = ImageFont.truetype(str(path), 42)
+                self.assertEqual(42, font.size)
+                self.assertEqual(expected_name, font.getname())
 
     def test_cli_status_json_reports_manifest(self):
         project = init_project(

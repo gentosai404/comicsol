@@ -88,7 +88,7 @@ Allowed keys are `story_plan`, `character_bible`, `storyboard`, `qa_report`, and
 
 ### `stage_versions`
 
-Contains exactly `planning`, `storyboard`, `generation`, `lettering`, `composition`, and `export`. Each value is a non-empty decimal version string; version 1.0 templates use `"1"`.
+Contains exactly `planning`, `storyboard`, `generation`, `lettering`, `composition`, and `export`. Each value is a non-empty decimal version string. Schema version 1.0 templates use lettering stage version `"2"` and `"1"` for every other stage; the lettering bump invalidates cached output from the earlier renderer without changing the artifact schema version.
 
 ## Character bible: `plan/character-bible.json`
 
@@ -162,7 +162,7 @@ Layout enums are `full-page`, `two-horizontal`, `three-horizontal`, `hero-top-tw
 | `expression` | string | Visible emotional expression |
 | `lighting` | string | Key/fill/environment light direction |
 | `continuity` | array[string] | Exact character/scene invariants checked in QA |
-| `negative` | array[string] | Includes text, bubbles, watermark and panel-specific failures to avoid |
+| `negative` | array[string] | Prohibits generated dialogue, captions, speech bubbles, logos, signatures, watermarks, unauthorized text/SFX, and panel-specific failures; exact authored SFX remains allowed |
 | `text` | array[text item] | 0–3 items; at most 45 words total |
 
 There are at most 12 panels project-wide. Every panel scene and character must exist. Dialogue speakers must both exist in the character bible and appear in the panel.
@@ -180,6 +180,11 @@ There are at most 12 panels project-wide. Every panel scene and character must e
 | `priority` | integer | Positive placement order; ties break by item ID |
 
 Anchors are `top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, and `bottom-right`. Control characters other than newline are invalid. Explicit newlines are optional wrapping hints. Authored punctuation and words are not rewritten by deterministic scripts.
+
+Dialogue and captions are deterministic lettering inputs. SFX is authored storyboard
+content for generation prompts and visual QA, but Pillow neither draws SFX nor allocates a placement rectangle or overlap reservation. Lettering summaries retain `text_count`
+for the total authored item count and additionally report `rendered_text_count` for
+dialogue/caption items and `sfx_count` for authored SFX items.
 
 ## Panel QA record: `qa/panels/{panel-id}.json`
 
@@ -201,7 +206,7 @@ Anchors are `top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`
 
 `generation` contains exactly `capability_name` (string or null), `reference_paths` (array of relative paths), and `completed_at` (timestamp or null). Nulls are permitted only before generation.
 
-Each check contains exactly `id`, `result`, `severity`, and `evidence`. The seven required IDs, in order, are `character-identity`, `anatomy`, `action`, `composition`, `continuity`, `text-free`, and `technical`. Results are `pass`, `fail`, or `warning`; severities are `error` or `warning`; evidence is a non-empty observation after inspection. `character-identity` passes when no recurring character is present. `technical` verifies readable raster data, minimum 512 px dimensions, aspect-ratio tolerance ±2%, and no unintended transparency.
+Each check contains exactly `id`, `result`, `severity`, and `evidence`. The seven required IDs, in order, are `character-identity`, `anatomy`, `action`, `composition`, `continuity`, `text-free`, and `technical`. Results are `pass`, `fail`, or `warning`; severities are `error` or `warning`; evidence is a non-empty observation after inspection. `character-identity` passes when no recurring character is present. `text-free` means no generated dialogue, captions, speech bubbles, logos, signatures, or watermarks; exact storyboard-authored SFX is allowed and required when authored, while missing, misspelled, duplicated, unauthorized, or un-authored SFX fails. `technical` verifies readable raster data, minimum 512 px dimensions, aspect-ratio tolerance ±2%, and no unintended transparency.
 
 Error-level failure selects `regenerate`. Warnings select `accept_with_warnings` unless readability is impaired. At most two visual regenerations are allowed per panel, and visual retries plus transient repeats share the project-wide cap of eight extra calls. A non-safety visual error may be explicitly overridden and recorded; corrupt images and safety refusals cannot be overridden.
 
@@ -234,7 +239,7 @@ output is UTF-8 with exactly one trailing newline.
 
 The version 1.0 project boundary contains `project.json`; exact source/request copies; the three plan JSON files; character/scene reference PNGs; preserved reference/panel prompt text; raw, clean, and lettered panel PNGs; per-panel QA JSON; `qa/report.md`; zero-padded `pages/page-001.png` files; `exports/{project-id}.pdf`; and append-only `logs/events.jsonl`.
 
-Failed image attempts are retained as `panels/raw/{panel-id}.attempt-{attempt-number}.png`; only the accepted attempt occupies `panels/raw/{panel-id}.png`. Generated images intentionally contain no dialogue, captions, SFX, signatures, logos, or watermarks.
+Failed image attempts are retained as `panels/raw/{panel-id}.attempt-{attempt-number}.png`; only the accepted attempt occupies `panels/raw/{panel-id}.png`. Generated images intentionally contain no dialogue, captions, speech bubbles, signatures, logos, or watermarks. Exact storyboard-authored SFX is instead allowed and required in generated artwork; generated SFX is forbidden when the storyboard has none.
 
 ## Cross-artifact and stage rules
 
@@ -242,7 +247,7 @@ Failed image attempts are retained as `panels/raw/{panel-id}.attempt-{attempt-nu
 - Storyboard scene, character, speaker, and continuity references resolve to the story plan and character bible.
 - Character fingerprints and canonical reference images are immutable after the first dependent panel is accepted.
 - Changing a fingerprint or reference invalidates dependent panels, pages, PDF, and QA outputs.
-- Changing dialogue alone invalidates lettered panels, pages, PDF, and the final report; raw and clean panels remain reusable.
+- Changing dialogue or captions alone invalidates lettered panels, pages, PDF, and the final report; raw and clean panels remain reusable. Changing authored SFX invalidates generation and every downstream artifact because SFX belongs to the artwork.
 - Artifact reuse requires file existence, matching recorded hash, schema validity, valid dependencies, and a matching stage cache key.
 - Deterministic writes use a sibling temporary file, flush and `fsync`, then `os.replace`; the manifest transition is last.
 - A no-change resume performs validation but writes no artifact, timestamp, or event.

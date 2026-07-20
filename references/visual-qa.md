@@ -8,7 +8,10 @@ declared invariants. Record non-empty evidence for exactly seven ordered checks:
 3. `action`: the scripted action and important props are present and correct.
 4. `composition`: camera, subject placement, focus, and reserved text-safe area work.
 5. `continuity`: exact character and scene anchors match adjacent panels.
-6. `text-free`: no generated lettering, bubble, caption, logo, signature, or watermark.
+6. `text-free`: no generated dialogue, caption, speech bubbles, logos, signatures, or
+   watermarks. Exact storyboard-authored SFX is allowed and required when authored;
+   missing, misspelled, duplicated, or unauthorized SFX fails this check, and generated
+   SFX fails when none is authored.
 7. `technical`: readable raster, minimum 512 px dimensions, aspect within ±2%, and no
    unintended alpha.
 
