@@ -606,14 +606,151 @@ class LetteringTests(unittest.TestCase):
             letter_panel(str(self.panel), 800, 1000, [item], self.characters)
         self.assertEqual(before, self.panel.read_bytes())
 
-    def test_cli_fixture_contract_uses_panel_png_and_json(self):
-        record = {
-            "panel_id": "p01-01", "checks": [], "text_items": [caption("A quiet caption.")],
-            "character_bible": self.characters,
-        }
-        (self.root / "p01-01.json").write_text(json.dumps(record), "utf-8")
-        self.assertTrue(self.panel.is_file())
-        self.assertTrue((self.root / "p01-01.json").is_file())
+    def test_cli_letters_project_and_prints_summaries(self):
+        import contextlib
+        import io
+
+        from letter_panels import main as letter_main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            shutil.copytree(FIXTURES / "valid-one-page", project)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(0, letter_main([str(project)]))
+            summaries = json.loads(output.getvalue())
+            self.assertEqual(3, len(summaries))
+            for summary in summaries:
+                self.assertIn("text_count", summary)
+                self.assertIn("rendered_text_count", summary)
+                self.assertIn("sfx_count", summary)
+                self.assertTrue(Path(summary["lettered_path"]).is_file())
+
+    def test_cli_font_override_applies_without_leaking_to_the_next_run(self):
+        import contextlib
+        import io
+
+        from letter_panels import main as letter_main
+
+        override = ROOT / "assets/fonts/NotoSans-Regular.ttf"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            custom_project = root / "custom"
+            default_project = root / "default"
+            shutil.copytree(FIXTURES / "valid-one-page", custom_project)
+            shutil.copytree(FIXTURES / "valid-one-page", default_project)
+
+            custom_output = io.StringIO()
+            with contextlib.redirect_stdout(custom_output):
+                self.assertEqual(
+                    0,
+                    letter_main([str(custom_project), "--font", str(override)]),
+                )
+            self.assertTrue(all(
+                summary["font_used"] == str(override)
+                for summary in json.loads(custom_output.getvalue())
+            ))
+
+            default_output = io.StringIO()
+            with contextlib.redirect_stdout(default_output):
+                self.assertEqual(0, letter_main([str(default_project)]))
+            self.assertTrue(all(
+                summary["font_used"] == str(FONT)
+                for summary in json.loads(default_output.getvalue())
+            ))
+
+    def test_cli_missing_invocation_uses_house_error_without_traceback(self):
+        import contextlib
+        import io
+
+        from letter_panels import main as letter_main
+
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(1, letter_main([]))
+        self.assertTrue(errors.getvalue().startswith("ERROR ValueError:"))
+        self.assertNotIn("Traceback", errors.getvalue())
+
+    def test_cli_malformed_project_uses_house_error_without_traceback(self):
+        import contextlib
+        import io
+
+        from comic_sol import atomic_write_json
+        from letter_panels import main as letter_main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            shutil.copytree(FIXTURES / "valid-one-page", project)
+            atomic_write_json(project / "plan/storyboard.json", {"pages": [None]})
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(1, letter_main([str(project)]))
+            self.assertTrue(errors.getvalue().startswith("ERROR ValueError:"))
+            self.assertNotIn("Traceback", errors.getvalue())
+
+    def test_failed_project_run_preserves_prior_lettered_artifacts(self):
+        import contextlib
+        import io
+
+        from comic_sol import atomic_write_json
+        from letter_panels import main as letter_main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            shutil.copytree(FIXTURES / "valid-one-page", project)
+            destination = project / "panels/p01-01/lettered.png"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (736, 1136), "magenta").save(destination)
+            before = destination.read_bytes()
+            storyboard = json.loads((project / "plan/storyboard.json").read_text("utf-8"))
+            storyboard["pages"][0]["panels"][1]["text"][0]["speaker"] = "ghost"
+            atomic_write_json(project / "plan/storyboard.json", storyboard)
+
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(1, letter_main([str(project)]))
+            self.assertTrue(errors.getvalue().startswith("ERROR ValueError:"))
+            self.assertNotIn("Traceback", errors.getvalue())
+            self.assertEqual(before, destination.read_bytes())
+
+    def test_cli_rejects_missing_font_override_without_traceback(self):
+        import contextlib
+        import io
+
+        from letter_panels import main as letter_main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            shutil.copytree(FIXTURES / "valid-one-page", project)
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(1, letter_main([
+                    str(project), "--font", str(Path(temporary) / "missing.ttf"),
+                ]))
+            self.assertTrue(errors.getvalue().startswith("ERROR ValueError:"))
+            self.assertIn("font", errors.getvalue().lower())
+            self.assertNotIn("Traceback", errors.getvalue())
+
+    def test_cli_normalizes_pillow_safety_error_without_traceback(self):
+        import contextlib
+        import io
+
+        from letter_panels import main as letter_main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            shutil.copytree(FIXTURES / "valid-one-page", project)
+            errors = io.StringIO()
+            with (
+                mock.patch(
+                    "letter_panels.Image.open",
+                    side_effect=Image.DecompressionBombError("unsafe dimensions"),
+                ),
+                contextlib.redirect_stderr(errors),
+            ):
+                self.assertEqual(1, letter_main([str(project)]))
+            self.assertTrue(errors.getvalue().startswith("ERROR ValueError:"))
+            self.assertNotIn("Traceback", errors.getvalue())
 
 
 class LetteringFixtureIntegrationTests(unittest.TestCase):
@@ -621,7 +758,15 @@ class LetteringFixtureIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "project"
             shutil.copytree(FIXTURES / "valid-one-page", project)
-            self.assertEqual(3, len(letter_project(project)))
+            outputs = letter_project(project)
+            self.assertEqual(
+                [
+                    project / "panels/p01-01/lettered.png",
+                    project / "panels/p01-02/lettered.png",
+                    project / "panels/p01-03/lettered.png",
+                ],
+                outputs,
+            )
 
 
 if __name__ == "__main__":

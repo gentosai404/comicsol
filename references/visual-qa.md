@@ -32,8 +32,12 @@ Results are `pass`, `warning`, or `fail`; severity is `warning` or `error`. Deci
   per-panel visual retry budget.
 - After exhaustion, an error-level panel is `BLOCKED` and cannot reach lettering/export.
 
-An explicit user may override a non-safety visual error with a recorded reason, producing
-`COMPLETE_WITH_WARNINGS`. Never override an unreadable/corrupt image or safety refusal.
+An explicit user may override an error categorized `visual_qa` with a recorded reason
+only when the image is readable and an error-level check has failed. The
+override downgrades the failed error-level checks to warning severity, records
+`override_reason`, and appends the reason to the panel and manifest warnings; the run
+then continues and the final transition selects `COMPLETE_WITH_WARNINGS`. Never
+override an unreadable/corrupt image, safety refusal, or non-visual failure.
 
 ## Composed-page QA
 

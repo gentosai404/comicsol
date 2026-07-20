@@ -47,6 +47,13 @@ pause unless a material condition applies.
 
 ## Ten stages
 
+After a stage's required inputs and outputs validate, persist its resume cache with
+`comic_sol.py record-stage PROJECT_DIR
+planning|storyboard|generation|lettering|composition|export`. Record before advancing
+to the next production stage; record `export` after the terminal QA report is rendered.
+Without a valid recorded cache entry, `resume-plan` honestly marks the affected stage
+and its downstream stages for rerun instead of guessing.
+
 ### 1. Detect and initialize
 
 Run `comic_sol.py doctor`, then `comic_sol.py init` with exact source/request files. For
@@ -92,15 +99,17 @@ at least 512 px in both dimensions. Never promote before visual QA.
 
 Apply all seven checks from the QA reference with evidence, including exact SFX spelling,
 count, and authorization. Retry only failed panels, retain every attempt, and use one
-correction clause. Use `comic_sol.py promote-attempt` for accepted images and
-`comic_sol.py override-panel` only for an explicit allowed user override. Validate with
-`validate_project.py PROJECT_DIR --stage panels`, then transition through `PANELS_READY`
-and `QA_READY`.
+correction clause. Use `comic_sol.py promote-attempt` for accepted images. Use
+`comic_sol.py override-panel` only for an explicit allowed user override: it downgrades
+the failed error-level checks to warning severity, records the reason on the panel and
+manifest, and the run continues toward `COMPLETE_WITH_WARNINGS` at the final transition.
+Validate with `validate_project.py PROJECT_DIR --stage panels`, then transition through
+`PANELS_READY` and `QA_READY`.
 
 ### 8. Normalize and letter
 
-Prepare clean panel files without semantic edits. Run `letter_panels.py PANEL_DIR
---output-root PATH`; inspect text placement and its summary. `text_count` is the
+Prepare clean panel files without semantic edits. Run `letter_panels.py PROJECT_DIR
+[--font PATH]`; inspect text placement and its summary. `text_count` is the
 backward-compatible authored total, `rendered_text_count` counts rendered dialogue and
 captions, and `sfx_count` counts validated authored SFX. Pillow must make no placement,
 overlap reservation, or pixel change for SFX. Transition to `LETTERED`.
@@ -113,10 +122,12 @@ or broken pages stop export without replacing a prior good output.
 
 ### 10. Final QA and completion
 
-Inspect composed pages, validate with `validate_project.py PROJECT_DIR --stage final`, and
-run `render_report.py PROJECT_DIR`. Transition to `COMPLETE` with no unresolved warnings,
-`COMPLETE_WITH_WARNINGS` for accepted warning-level impact, or `BLOCKED` for any remaining
-error-level failure.
+Inspect composed pages and validate with `validate_project.py PROJECT_DIR --stage final`.
+Transition to `COMPLETE` with no unresolved warnings, `COMPLETE_WITH_WARNINGS` for
+accepted warning-level impact, or `BLOCKED` for any remaining error-level failure. If
+unresolved manifest warnings exist, requesting the final `COMPLETE` transition selects
+`COMPLETE_WITH_WARNINGS` automatically. Then run `render_report.py PROJECT_DIR` so its
+final-status projection matches the terminal manifest, and record the `export` cache.
 
 The success path is:
 

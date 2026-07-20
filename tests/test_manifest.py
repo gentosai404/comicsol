@@ -77,7 +77,6 @@ class ManifestTests(unittest.TestCase):
             "prompts/panels",
             "panels/raw",
             "panels/clean",
-            "panels/lettered",
             "qa/panels",
             "pages",
             "exports",
@@ -289,9 +288,8 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(regular, letter_panels.FONT_PATH)
         self.assertEqual(bold, getattr(letter_panels, "FONT_PATH_BOLD", None))
         self.assertEqual(fallback, getattr(letter_panels, "FONT_PATH_FALLBACK", None))
-        arguments = letter_panels._build_parser().parse_args(
-            [str(self.root), "--output-root", str(self.root / "output")]
-        )
+        arguments = letter_panels._build_parser().parse_args([str(self.root)])
+        self.assertEqual(self.root, arguments.project_dir)
         self.assertEqual(regular, arguments.font)
 
     def test_bundled_comic_neue_faces_load_at_42px(self):

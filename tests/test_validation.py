@@ -236,6 +236,18 @@ class StrictSchemaValidationTests(unittest.TestCase):
                 self.assert_issue(validate_manifest(data), field)
         self.assertEqual([], validate_manifest(valid_manifest()))
 
+    def test_manifest_terminal_status_matches_warning_presence(self):
+        complete = valid_manifest()
+        complete.update({"status": "COMPLETE", "warnings": ["minor prop drift"]})
+        self.assert_issue(validate_manifest(complete), "status")
+
+        warned = valid_manifest()
+        warned["status"] = "COMPLETE_WITH_WARNINGS"
+        self.assert_issue(validate_manifest(warned), "warnings")
+
+        warned["warnings"] = ["minor prop drift"]
+        self.assertEqual([], validate_manifest(warned))
+
     def test_character_and_story_rules_are_strict(self):
         character_cases = []
         data = valid_characters(); data["unknown"] = 1; character_cases.append((data, "unknown"))
@@ -345,6 +357,27 @@ class StrictSchemaValidationTests(unittest.TestCase):
         data.update({"decision": "regenerate", "retry_reason": "warning impairs readability"})
         self.assertEqual([], validate_panel_record(data))
 
+    def test_panel_override_fields_require_a_recorded_visual_warning(self):
+        reason = "minor prop drift is acceptable"
+        valid = valid_panel_record()
+        valid["checks"][0].update({"result": "fail", "severity": "warning"})
+        valid.update({
+            "decision": "accept_with_warnings",
+            "failure_category": "visual_qa",
+            "override_reason": reason,
+            "unresolved_warnings": [reason],
+        })
+        self.assertEqual([], validate_panel_record(valid))
+
+        cases = []
+        data = deepcopy(valid); data["failure_category"] = "safety_refusal"; cases.append((data, "failure_category"))
+        data = deepcopy(valid); data["decision"] = "accept"; cases.append((data, "override_reason"))
+        data = deepcopy(valid); data["unresolved_warnings"] = ["different warning"]; cases.append((data, "override_reason"))
+        data = deepcopy(valid); data["checks"][0].update({"result": "pass", "severity": "error"}); cases.append((data, "override_reason"))
+        for data, field in cases:
+            with self.subTest(field=field):
+                self.assert_issue(validate_panel_record(data), field)
+
 
 class ProjectValidationTests(unittest.TestCase):
     def setUp(self):
@@ -413,6 +446,95 @@ class ProjectValidationTests(unittest.TestCase):
         issues = validate_project(self.project, "panels")
         self.assertTrue(any("hash" in issue.message for issue in issues), issues)
         self.assertTrue(any("aspect" in issue.message for issue in issues), issues)
+
+    def test_panel_stage_normalizes_pillow_safety_error_as_validation_issue(self):
+        self.add_panel_files()
+        with patch(
+            "validate_project.Image.open",
+            side_effect=Image.DecompressionBombError("unsafe dimensions"),
+        ):
+            issues = validate_project(self.project, "panels")
+        self.assertTrue(any("unreadable" in issue.message for issue in issues), issues)
+
+    def test_final_stage_rejects_safety_failure_despite_complete_manifest(self):
+        self.add_panel_files()
+        record_path = self.project / "qa/panels/p01-01.json"
+        record = read_json(record_path)
+        record.update({
+            "decision": "regenerate",
+            "retry_reason": "provider safety refusal",
+            "failure_category": "safety_refusal",
+        })
+        atomic_write_json(record_path, record)
+
+        manifest_path = self.project / "project.json"
+        manifest = read_json(manifest_path)
+        manifest.update({"status": "COMPLETE", "warnings": []})
+        atomic_write_json(manifest_path, manifest)
+
+        issues = validate_project(self.project, "final")
+        self.assertTrue(any(
+            issue.path == "qa/panels/p01-01.json"
+            and issue.field == "decision"
+            and "unresolved" in issue.message
+            for issue in issues
+        ), issues)
+        self.assertTrue(any(
+            issue.path == "project.json"
+            and issue.field == "status"
+            and "unresolved panel errors" in issue.message
+            for issue in issues
+        ), issues)
+
+    def test_final_stage_requires_panel_warnings_and_warning_terminal(self):
+        self.add_panel_files()
+        reason = "minor prop drift is acceptable"
+        record_path = self.project / "qa/panels/p01-01.json"
+        record = read_json(record_path)
+        record["checks"][0].update({"result": "fail", "severity": "warning"})
+        record.update({
+            "decision": "accept_with_warnings",
+            "failure_category": "visual_qa",
+            "override_reason": reason,
+            "unresolved_warnings": [reason],
+        })
+        atomic_write_json(record_path, record)
+
+        manifest_path = self.project / "project.json"
+        manifest = read_json(manifest_path)
+        manifest.update({"status": "COMPLETE", "warnings": []})
+        atomic_write_json(manifest_path, manifest)
+
+        issues = validate_project(self.project, "final")
+        self.assertTrue(any(
+            issue.path == "project.json"
+            and issue.field == "warnings"
+            and reason in issue.message
+            for issue in issues
+        ), issues)
+        self.assertTrue(any(
+            issue.path == "project.json"
+            and issue.field == "status"
+            and "COMPLETE_WITH_WARNINGS" in issue.message
+            for issue in issues
+        ), issues)
+
+        manifest.update({"status": "COMPLETE_WITH_WARNINGS", "warnings": [reason]})
+        atomic_write_json(manifest_path, manifest)
+        self.assertEqual([], validate_project(self.project, "final"))
+
+    def test_final_stage_reports_malformed_manifest_warnings_without_raising(self):
+        self.add_panel_files()
+        manifest_path = self.project / "project.json"
+        manifest = read_json(manifest_path)
+        manifest["warnings"] = [{"invalid": "warning"}]
+        atomic_write_json(manifest_path, manifest)
+
+        issues = validate_project(self.project, "final")
+        self.assertTrue(any(
+            issue.path == "project.json" and issue.field.startswith("warnings")
+            for issue in issues
+        ), issues)
 
     def test_missing_files_are_sorted_validation_issues(self):
         shutil.rmtree(self.project / "plan")
@@ -601,7 +723,8 @@ class SkillContractTests(unittest.TestCase):
         commands = (
             "comic_sol.py init", "comic_sol.py transition", "comic_sol.py status",
             "comic_sol.py doctor", "comic_sol.py resume-plan", "comic_sol.py invalidate",
-            "comic_sol.py record-attempt", "comic_sol.py promote-attempt",
+            "comic_sol.py record-stage", "comic_sol.py record-attempt",
+            "comic_sol.py promote-attempt",
             "comic_sol.py override-panel", "validate_project.py", "letter_panels.py",
             "compose_pages.py", "export_pdf.py", "render_report.py",
         )

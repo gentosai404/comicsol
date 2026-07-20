@@ -10,6 +10,7 @@ import math
 import re
 import struct
 import sys
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -21,7 +22,8 @@ from comic_sol import atomic_write_bytes, read_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FONT_PATH = ROOT / "assets/fonts/ComicNeue-Regular.ttf"
+DEFAULT_FONT_PATH = ROOT / "assets/fonts/ComicNeue-Regular.ttf"
+FONT_PATH = DEFAULT_FONT_PATH
 FONT_PATH_BOLD = ROOT / "assets/fonts/ComicNeue-Bold.ttf"
 FONT_PATH_FALLBACK = ROOT / "assets/fonts/NotoSans-Regular.ttf"
 ANCHORS = (
@@ -726,7 +728,7 @@ def letter_panel(
             base = ImageOps.exif_transpose(source).convert("RGBA")
             if base.size != (panel_width, panel_height):
                 base = ImageOps.fit(base, (panel_width, panel_height), method=Image.Resampling.LANCZOS)
-    except OSError as error:
+    except (OSError, Image.DecompressionBombError) as error:
         raise ValueError(f"panel is not a readable image: {path}") from error
 
     ordered = sorted(
@@ -751,7 +753,7 @@ def letter_panel(
     sfx_count = len(ordered) - rendered_text_count
     word_count = sum(normalized_word_count(item["content"]) for item in ordered)
     summary = {
-        "font_used": str(FONT_PATH),
+        "font_used": str(Path(_load_font(12).path)),
         "lettered_path": str(path),
         "rendered_text_count": rendered_text_count,
         "sfx_count": sfx_count,
@@ -794,63 +796,104 @@ def letter_panel(
     return summary
 
 
-def letter_project(project_dir: Path) -> list[Path]:
-    """Letter every accepted project panel using its editable storyboard text."""
+def _letter_project_with_summaries(
+    project_dir: Path,
+) -> tuple[list[Path], list[dict]]:
+    """Letter every accepted project panel and collect outputs plus summaries."""
     project_dir = Path(project_dir)
     storyboard = read_json(project_dir / "plan/storyboard.json")
-    bible = read_json(project_dir / "plan/character-bible.json").get("characters", [])
-    panels = [
-        panel
-        for page in storyboard.get("pages", [])
-        for panel in page.get("panels", [])
-    ]
+    pages = storyboard.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("storyboard pages must be a non-empty array")
+    panels: list[dict] = []
+    for page_index, page in enumerate(pages):
+        if not isinstance(page, dict):
+            raise ValueError(f"storyboard page {page_index + 1} must be an object")
+        page_panels = page.get("panels")
+        if not isinstance(page_panels, list) or not page_panels:
+            raise ValueError(f"storyboard page {page_index + 1} panels must be a non-empty array")
+        for panel_index, panel in enumerate(page_panels):
+            if not isinstance(panel, dict):
+                raise ValueError(
+                    f"storyboard page {page_index + 1} panel {panel_index + 1} must be an object"
+                )
+            panel_id = panel.get("id")
+            if not isinstance(panel_id, str) or re.fullmatch(r"p[0-9]{2}-[0-9]{2}", panel_id) is None:
+                raise ValueError(
+                    f"storyboard page {page_index + 1} panel {panel_index + 1} has an invalid ID"
+                )
+            if not isinstance(panel.get("text"), list):
+                raise ValueError(f"storyboard panel {panel_id} text must be an array")
+            panels.append(panel)
+    bible = read_json(project_dir / "plan/character-bible.json").get("characters")
+    if not isinstance(bible, list) or any(not isinstance(character, dict) for character in bible):
+        raise ValueError("character bible characters must be an array of objects")
     outputs: list[Path] = []
-    for panel in panels:
-        panel_id = panel["id"]
-        source = project_dir / f"panels/clean/{panel_id}.png"
-        destination = project_dir / f"panels/{panel_id}/lettered.png"
-        atomic_write_bytes(destination, source.read_bytes())
-        with Image.open(source) as image:
-            width, height = image.size
-        letter_panel(str(destination), width, height, panel.get("text", []), bible)
-        outputs.append(destination)
+    summaries: list[dict] = []
+    staged: list[tuple[Path, bytes, dict]] = []
+    with tempfile.TemporaryDirectory(prefix="comic-sol-lettering-") as temporary:
+        temporary_root = Path(temporary)
+        for panel in panels:
+            panel_id = panel["id"]
+            source = project_dir / f"panels/clean/{panel_id}.png"
+            destination = project_dir / f"panels/{panel_id}/lettered.png"
+            try:
+                with Image.open(source) as image:
+                    image.load()
+                    width, height = image.size
+                source_bytes = source.read_bytes()
+            except (OSError, SyntaxError, Image.DecompressionBombError) as error:
+                raise ValueError(f"panel {panel_id} is not a readable image") from error
+            staged_path = temporary_root / f"{panel_id}.png"
+            atomic_write_bytes(staged_path, source_bytes)
+            summary = letter_panel(
+                str(staged_path), width, height, panel.get("text", []), bible
+            )
+            summary["lettered_path"] = str(destination)
+            staged.append((destination, staged_path.read_bytes(), summary))
+        for destination, payload, summary in staged:
+            atomic_write_bytes(destination, payload)
+            outputs.append(destination)
+            summaries.append(summary)
+    return outputs, summaries
+
+
+def letter_project(project_dir: Path) -> list[Path]:
+    """Letter every accepted project panel and return its output paths."""
+    outputs, _ = _letter_project_with_summaries(project_dir)
     return outputs
 
 
+class _LetteringArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ValueError(f"invalid invocation: {message}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="letter_panels.py")
-    parser.add_argument("panel_dir", type=Path)
-    parser.add_argument("--output-root", required=True, type=Path)
-    parser.add_argument("--font", type=Path, default=FONT_PATH)
+    parser = _LetteringArgumentParser(prog="letter_panels.py")
+    parser.add_argument("project_dir", type=Path)
+    parser.add_argument("--font", type=Path, default=DEFAULT_FONT_PATH)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     global FONT_PATH
-    arguments = _build_parser().parse_args(argv)
-    FONT_PATH = arguments.font
+    previous_font = FONT_PATH
     try:
-        arguments.output_root.mkdir(parents=True, exist_ok=True)
-        results = []
-        for record_path in sorted(arguments.panel_dir.glob("*.json")):
-            record = json.loads(record_path.read_text("utf-8"))
-            panel_id = record.get("panel_id", record_path.stem)
-            source = arguments.panel_dir / f"{panel_id}.png"
-            if not source.is_file():
-                raise ValueError(f"missing panel PNG for {panel_id}")
-            destination = arguments.output_root / f"{panel_id}.png"
-            atomic_write_bytes(destination, source.read_bytes())
-            with Image.open(source) as image:
-                width, height = image.size
-            results.append(letter_panel(
-                str(destination), width, height,
-                record.get("text_items", []), record.get("character_bible", []),
-            ))
-        print(json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True))
+        arguments = _build_parser().parse_args(argv)
+        try:
+            _load_font_path(str(arguments.font), 12)
+        except OSError as error:
+            raise ValueError(f"font is not a readable TrueType/OpenType file: {arguments.font}") from error
+        FONT_PATH = arguments.font
+        _, summaries = _letter_project_with_summaries(arguments.project_dir)
+        print(json.dumps(summaries, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR {type(error).__name__}: {error}", file=sys.stderr)
         return 1
+    finally:
+        FONT_PATH = previous_font
 
 
 if __name__ == "__main__":

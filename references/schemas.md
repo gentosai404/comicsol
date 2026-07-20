@@ -203,12 +203,14 @@ dialogue/caption items and `sfx_count` for authored SFX items.
 | `decision` | enum | `accept`, `regenerate`, or `accept_with_warnings` |
 | `retry_reason` | string or null | Required when decision is regenerate |
 | `unresolved_warnings` | array[string] | User-visible impact descriptions |
+| `failure_category` | string or null | Optional sanitized category such as `visual_qa`, `corrupt_image`, or `safety_refusal`; only `visual_qa` is overridable |
+| `override_reason` | string or null | Optional; set only by an explicit recorded override and repeated in `unresolved_warnings` |
 
 `generation` contains exactly `capability_name` (string or null), `reference_paths` (array of relative paths), and `completed_at` (timestamp or null). Nulls are permitted only before generation.
 
 Each check contains exactly `id`, `result`, `severity`, and `evidence`. The seven required IDs, in order, are `character-identity`, `anatomy`, `action`, `composition`, `continuity`, `text-free`, and `technical`. Results are `pass`, `fail`, or `warning`; severities are `error` or `warning`; evidence is a non-empty observation after inspection. `character-identity` passes when no recurring character is present. `text-free` means no generated dialogue, captions, speech bubbles, logos, signatures, or watermarks; exact storyboard-authored SFX is allowed and required when authored, while missing, misspelled, duplicated, unauthorized, or un-authored SFX fails. `technical` verifies readable raster data, minimum 512 px dimensions, aspect-ratio tolerance ±2%, and no unintended transparency.
 
-Error-level failure selects `regenerate`. Warnings select `accept_with_warnings` unless readability is impaired. At most two visual regenerations are allowed per panel, and visual retries plus transient repeats share the project-wide cap of eight extra calls. A non-safety visual error may be explicitly overridden and recorded; corrupt images and safety refusals cannot be overridden.
+Error-level failure selects `regenerate`. Warnings select `accept_with_warnings` unless readability is impaired. At most two visual regenerations are allowed per panel, and visual retries plus transient repeats share the project-wide cap of eight extra calls. A failure categorized `visual_qa` may be explicitly overridden only while it has an error-level failed check and a readable image; corrupt images, safety refusals, and non-visual failures cannot be overridden. An override downgrades the failed error-level checks to warning severity, sets `decision` to `accept_with_warnings`, records `override_reason`, and appends the reason to `unresolved_warnings` and the manifest warnings. The manifest status keeps advancing through the linear stages; when unresolved warnings exist, the final transition selects `COMPLETE_WITH_WARNINGS` even if `COMPLETE` was requested.
 
 ## Human-readable QA report: `qa/report.md`
 
@@ -229,17 +231,27 @@ regeneration, warning, and hard-failure counts are calculated from those records
 than copied from manifest summaries. A hard failure is an error-level failed check whose
 retry budget is exhausted, or a corrupt/safety category that cannot be overridden.
 Markdown table evidence escapes `|` as `\|` and renders embedded newlines as `<br>`.
-When no panel has user-visible unresolved impact, the warnings section is exactly
-`No unresolved warnings.` The integrity section lists recorded relative paths and
+Manifest-only project/page warnings are merged with panel warnings and deduplicated with
+their source identified. When neither the manifest nor a panel has user-visible
+unresolved impact, the warnings section is exactly `No unresolved warnings.` The integrity section lists recorded relative paths and
 SHA-256 values, page dimensions/order, reference existence, and the PDF readability
 result. Rendering fails before publication if any `{{TOKEN}}` remains, and successful
 output is UTF-8 with exactly one trailing newline.
 
 ## Generated project paths
 
-The version 1.0 project boundary contains `project.json`; exact source/request copies; the three plan JSON files; character/scene reference PNGs; preserved reference/panel prompt text; raw, clean, and lettered panel PNGs; per-panel QA JSON; `qa/report.md`; zero-padded `pages/page-001.png` files; `exports/{project-id}.pdf`; and append-only `logs/events.jsonl`.
+The version 1.0 project boundary contains `project.json`; exact source/request copies; the three plan JSON files; character/scene reference PNGs; preserved reference/panel prompt text; raw `panels/raw/{panel-id}.png`, clean `panels/clean/{panel-id}.png`, and lettered `panels/{panel-id}/lettered.png` panel images; per-panel QA JSON; `qa/report.md`; zero-padded `pages/page-001.png` files; `exports/{project-id}.pdf`; the resume cache `logs/stage-cache.json`; and append-only `logs/events.jsonl`.
 
 Failed image attempts are retained as `panels/raw/{panel-id}.attempt-{attempt-number}.png`; only the accepted attempt occupies `panels/raw/{panel-id}.png`. Generated images intentionally contain no dialogue, captions, speech bubbles, signatures, logos, or watermarks. Exact storyboard-authored SFX is instead allowed and required in generated artwork; generated SFX is forbidden when the storyboard has none.
+
+## Stage cache: `logs/stage-cache.json`
+
+`comic_sol.py record-stage PROJECT_DIR STAGE` persists one completed stage's resume cache entry atomically. The file is a canonical JSON object containing exactly `schema_version` and `stages`. During a run, `stages` contains zero or more entries keyed only by the six resume stages (`planning`, `storyboard`, `generation`, `lettering`, `composition`, `export`); a fully recorded project contains all six. Each entry contains exactly:
+
+- `key`: the SHA-256 stage cache key over timestamp-free semantic inputs, required material file hashes, and the manifest `stage_versions` value. Generation material includes each panel's recorded source prompt and actual character/scene reference paths.
+- `artifacts`: an object mapping every required stage output file (relative path) to its SHA-256 value.
+
+`record-stage` refuses to record a stage when any required input or output is missing. If an existing cache is structurally invalid, the command starts a new canonical cache with only the newly recorded entry rather than preserving untrusted entries. `resume-plan` compares every recorded generated-artifact hash and freshly computed material; panel reuse additionally requires a valid accepted QA record and a reusable generation-stage cache. A missing cache entry or invalid cache file produces an honest rerun plan rather than a traceback. `invalidate` drops the affected stage and every downstream entry while preserving upstream entries and artifact files; it publishes the pruned cache before the rewound manifest.
 
 ## Cross-artifact and stage rules
 

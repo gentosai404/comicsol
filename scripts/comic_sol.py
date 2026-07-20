@@ -72,6 +72,10 @@ ARTIFACT_STAGE = {
 TIMESTAMP_KEYS = {"created_at", "updated_at", "detected_at", "completed_at", "timestamp"}
 STAGE_CACHE_PATH = Path("logs/stage-cache.json")
 GENERATION_COUNTERS_PATH = Path("logs/generation-counters.json")
+PANEL_CHECK_IDS = (
+    "character-identity", "anatomy", "action", "composition", "continuity",
+    "text-free", "technical",
+)
 
 
 @dataclass(frozen=True)
@@ -90,7 +94,6 @@ PROJECT_DIRECTORIES = (
     "prompts/panels",
     "panels/raw",
     "panels/clean",
-    "panels/lettered",
     "qa/panels",
     "pages",
     "exports",
@@ -451,12 +454,15 @@ def transition(
     manifest_path = project_dir / "project.json"
     manifest = read_json(manifest_path)
     current = manifest.get("status")
-    if not isinstance(current, str) or not _allowed_transition(current, target):
-        raise ValueError(f"invalid Comic Sol transition: {current} -> {target}")
-
     warnings = manifest.get("warnings")
     if not isinstance(warnings, list):
         raise ValueError("manifest warnings must be an array")
+    if current == "EXPORTED" and target == "COMPLETE" and (warnings or warning):
+        target = "COMPLETE_WITH_WARNINGS"
+    if not isinstance(current, str) or not _allowed_transition(current, target):
+        raise ValueError(f"invalid Comic Sol transition: {current} -> {target}")
+    if target == "COMPLETE_WITH_WARNINGS" and not (warnings or warning):
+        raise ValueError("COMPLETE_WITH_WARNINGS requires an unresolved warning")
     if warning and warning not in warnings:
         warnings.append(warning)
     manifest["status"] = target
@@ -516,8 +522,12 @@ def _storyboard_panels(storyboard: dict[str, object]) -> list[dict[str, object]]
     return panels
 
 
-def _existing_files(project_dir: Path, relatives: list[str]) -> list[Path]:
-    return [project_dir / relative for relative in relatives if (project_dir / relative).is_file()]
+def _project_files(project_dir: Path, relatives: list[str]) -> list[Path]:
+    """Resolve required relative files without silently dropping missing inputs."""
+    return [
+        _contained_project_path(project_dir, Path(relative))
+        for relative in relatives
+    ]
 
 
 def _resume_stage_material(
@@ -540,6 +550,8 @@ def _resume_stage_material(
     storyboard = read_json(project_dir / "plan/storyboard.json")
     panels = _storyboard_panels(storyboard)
     panel_ids = [panel.get("id") for panel in panels if isinstance(panel.get("id"), str)]
+    if not panel_ids:
+        raise ValueError("storyboard has no panels")
     if stage == "generation":
         visual_panels = []
         for panel in panels:
@@ -555,7 +567,27 @@ def _resume_stage_material(
             else:
                 visual_panel.pop("text", None)
             visual_panels.append(visual_panel)
-        prompt_paths = [f"prompts/panels/{panel_id}.txt" for panel_id in panel_ids]
+        dependencies: list[dict[str, object]] = []
+        actual_reference_paths: list[str] = []
+        prompt_paths: list[str] = []
+        for panel_id in panel_ids:
+            record = read_json(project_dir / f"qa/panels/{panel_id}.json")
+            if record.get("panel_id") != panel_id:
+                raise ValueError(f"panel QA record does not match {panel_id}")
+            source_prompt_path = record.get("source_prompt_path")
+            generation = record.get("generation")
+            references = generation.get("reference_paths") if isinstance(generation, dict) else None
+            if not isinstance(source_prompt_path, str) or not isinstance(references, list) or not all(
+                isinstance(reference, str) for reference in references
+            ):
+                raise ValueError(f"panel QA dependencies are invalid: {panel_id}")
+            prompt_paths.append(source_prompt_path)
+            actual_reference_paths.extend(references)
+            dependencies.append({
+                "panel_id": panel_id,
+                "reference_paths": references,
+                "source_prompt_path": source_prompt_path,
+            })
         reference_paths: list[str] = []
         character_items = characters.get("characters", [])
         if isinstance(character_items, list):
@@ -565,12 +597,15 @@ def _resume_stage_material(
                 if isinstance(item, dict) and isinstance(item.get("reference_path"), str)
             ]
         return (
-            [visual_panels, characters, manifest.get("capability", {})],
-            _existing_files(project_dir, prompt_paths + reference_paths),
+            [visual_panels, characters, manifest.get("capability", {}), dependencies],
+            _project_files(
+                project_dir,
+                list(dict.fromkeys(prompt_paths + reference_paths + actual_reference_paths)),
+            ),
         )
     if stage == "lettering":
         text = [panel.get("text", []) for panel in panels]
-        return text and [text] or [[]], _existing_files(
+        return text and [text] or [[]], _project_files(
             project_dir, [f"panels/clean/{panel_id}.png" for panel_id in panel_ids]
         )
     if stage == "composition":
@@ -588,16 +623,16 @@ def _resume_stage_material(
                         panel.get("rect") for panel in page_panels if isinstance(panel, dict)
                     ] if isinstance(page_panels, list) else [],
                 })
-        return [geometry], _existing_files(
-            project_dir, [f"panels/lettered/{panel_id}.png" for panel_id in panel_ids]
+        return [geometry], _project_files(
+            project_dir, [f"panels/{panel_id}/lettered.png" for panel_id in panel_ids]
         )
     settings = manifest.get("settings", {})
     project_id = manifest.get("project_id")
     page_count = settings.get("page_count", 0) if isinstance(settings, dict) else 0
-    page_paths = [f"pages/page-{number:02d}.png" for number in range(1, page_count + 1)] if isinstance(page_count, int) else []
+    page_paths = [f"pages/page-{number:03d}.png" for number in range(1, page_count + 1)] if isinstance(page_count, int) else []
     return (
         [{"project_id": project_id, "settings": settings}],
-        _existing_files(project_dir, page_paths + ["qa/report.md"]),
+        _project_files(project_dir, page_paths + ["qa/report.md"]),
     )
 
 
@@ -626,22 +661,257 @@ def _manifest_artifact_problem(
     return problems
 
 
+def _stage_output_files(
+    project_dir: Path,
+    stage: str,
+    manifest: dict[str, object],
+) -> list[Path]:
+    """Return every required output path one resume stage is accountable for."""
+    if stage == "planning":
+        return _project_files(project_dir, ["plan/story-plan.json", "plan/character-bible.json"])
+    if stage == "storyboard":
+        return _project_files(project_dir, ["plan/storyboard.json"])
+    storyboard = read_json(project_dir / "plan/storyboard.json")
+    panels = _storyboard_panels(storyboard)
+    panel_ids = [panel.get("id") for panel in panels if isinstance(panel.get("id"), str)]
+    if not panel_ids:
+        raise ValueError("storyboard has no panels")
+    if stage == "generation":
+        relatives = [f"panels/raw/{panel_id}.png" for panel_id in panel_ids]
+        relatives += [f"panels/clean/{panel_id}.png" for panel_id in panel_ids]
+        return _project_files(project_dir, relatives)
+    if stage == "lettering":
+        return _project_files(
+            project_dir, [f"panels/{panel_id}/lettered.png" for panel_id in panel_ids]
+        )
+    if stage == "composition":
+        page_numbers = []
+        for page in storyboard.get("pages", []):
+            if isinstance(page, dict) and isinstance(page.get("number"), int):
+                page_numbers.append(page["number"])
+        return _project_files(
+            project_dir, [f"pages/page-{number:03d}.png" for number in page_numbers]
+        )
+    project_id = manifest.get("project_id")
+    relatives = ["qa/report.md"]
+    if isinstance(project_id, str) and project_id:
+        relatives.append(f"exports/{project_id}.pdf")
+    return _project_files(project_dir, relatives)
+
+
+def _empty_stage_cache() -> dict[str, object]:
+    return {"schema_version": "1.0", "stages": {}}
+
+
+def _stage_cache_structure_problem(cache: dict[str, object]) -> str | None:
+    if set(cache) != {"schema_version", "stages"}:
+        return "top level must contain exactly schema_version and stages"
+    if cache.get("schema_version") != "1.0":
+        return "schema_version must equal 1.0"
+    stages = cache.get("stages")
+    if not isinstance(stages, dict):
+        return "stages must be an object"
+    if any(stage not in RESUME_STAGES for stage in stages):
+        return "stages contains an unknown stage"
+    for stage, entry in stages.items():
+        if not isinstance(entry, dict) or set(entry) != {"artifacts", "key"}:
+            return f"{stage} must contain exactly artifacts and key"
+        key = entry.get("key")
+        if not isinstance(key, str) or SHA256.fullmatch(key) is None:
+            return f"{stage}.key must be a lowercase SHA-256"
+        artifacts = entry.get("artifacts")
+        if not isinstance(artifacts, dict):
+            return f"{stage}.artifacts must be an object"
+        for relative, expected_hash in artifacts.items():
+            try:
+                normalized = _relative_event_path(relative)
+            except ValueError:
+                return f"{stage}.artifacts contains an invalid path"
+            if normalized != relative:
+                return f"{stage}.artifacts paths must be normalized POSIX paths"
+            if not isinstance(expected_hash, str) or SHA256.fullmatch(expected_hash) is None:
+                return f"{stage}.artifacts contains an invalid SHA-256"
+    return None
+
+
+def _load_stage_cache(cache_path: Path) -> tuple[dict[str, object], str | None]:
+    if not cache_path.is_file():
+        return _empty_stage_cache(), None
+    try:
+        cache = read_json(cache_path)
+    except (OSError, UnicodeError, ValueError) as error:
+        return _empty_stage_cache(), f"stage cache is invalid: {type(error).__name__}"
+    problem = _stage_cache_structure_problem(cache)
+    if problem is not None:
+        return _empty_stage_cache(), f"stage cache is invalid: {problem}"
+    return cache, None
+
+
+def record_stage(project_dir: Path, stage: str) -> dict[str, object]:
+    """Persist one completed stage's cache key and output hashes for resume."""
+    if stage not in RESUME_STAGES:
+        raise ValueError(f"unknown resume stage: {stage}")
+    project_dir = Path(project_dir).resolve()
+    manifest = read_json(project_dir / "project.json")
+    versions = manifest.get("stage_versions")
+    if not isinstance(versions, dict) or not isinstance(versions.get(stage), str):
+        raise ValueError("manifest stage_versions must contain the stage version")
+    output_files = _stage_output_files(project_dir, stage, manifest)
+    missing_outputs = [
+        path.relative_to(project_dir).as_posix()
+        for path in output_files
+        if not path.is_file()
+    ]
+    if missing_outputs:
+        raise ValueError(f"stage output is missing: {missing_outputs[0]}")
+    canonical_inputs, files = _resume_stage_material(project_dir, stage, manifest)
+    key = stage_cache_key(stage, canonical_inputs, files, versions[stage])
+    artifacts = {
+        path.relative_to(project_dir).as_posix(): sha256_file(path)
+        for path in output_files
+    }
+    cache_path = project_dir / STAGE_CACHE_PATH
+    cache, _ = _load_stage_cache(cache_path)
+    stages = cache["stages"]
+    assert isinstance(stages, dict)
+    stages[stage] = {"artifacts": artifacts, "key": key}
+    atomic_write_json(cache_path, cache)
+    append_event(project_dir, "stage.recorded", {"action": stage})
+    return {"artifacts": len(artifacts), "stage": stage}
+
+
+def _accepted_panel_problem(
+    project_dir: Path,
+    record: dict[str, object],
+) -> str | None:
+    required_fields = {
+        "schema_version", "panel_id", "source_prompt_path", "raw_path", "clean_path",
+        "raw_sha256", "dimensions", "attempts", "generation", "checks", "decision",
+        "retry_reason", "unresolved_warnings",
+    }
+    if not required_fields <= set(record) or set(record) - required_fields - {
+        "failure_category", "override_reason",
+    }:
+        return "accepted panel QA record is invalid"
+    if record.get("schema_version") != "1.0":
+        return "accepted panel QA record is invalid"
+    if record.get("failure_category") in {
+        "corrupt", "corrupt_image", "safety", "safety_refusal",
+    }:
+        return "non-overridable panel failure cannot be reused"
+    # Import lazily because the standalone validator imports this lifecycle module.
+    # Reuse must nevertheless honor the exact public panel-record schema.
+    from validate_project import validate_panel_record
+
+    schema_issues = validate_panel_record(record)
+    if schema_issues:
+        first = schema_issues[0]
+        return f"accepted panel QA record is invalid: {first.field}: {first.message}"
+    panel_id = record.get("panel_id")
+    if not isinstance(panel_id, str) or not IDENTIFIER.fullmatch(panel_id):
+        return "accepted panel QA record is invalid"
+    attempts = record.get("attempts")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        return "accepted panel QA record is invalid"
+    dimensions = record.get("dimensions")
+    if not isinstance(dimensions, dict) or set(dimensions) != {"width", "height"}:
+        return "accepted panel QA record is invalid"
+    generation = record.get("generation")
+    if not isinstance(generation, dict) or set(generation) != {
+        "capability_name", "completed_at", "reference_paths",
+    }:
+        return "accepted panel QA record is invalid"
+    references = generation.get("reference_paths")
+    if not isinstance(references, list) or not all(isinstance(item, str) for item in references):
+        return "accepted panel QA record is invalid"
+    checks = record.get("checks")
+    if not isinstance(checks, list) or tuple(
+        check.get("id") if isinstance(check, dict) else None for check in checks
+    ) != PANEL_CHECK_IDS:
+        return "accepted panel QA record is invalid"
+    for check in checks:
+        if (
+            not isinstance(check, dict)
+            or set(check) != {"id", "result", "severity", "evidence"}
+            or check.get("result") not in {"pass", "fail", "warning"}
+            or check.get("severity") not in {"error", "warning"}
+            or not isinstance(check.get("evidence"), str)
+            or not check["evidence"].strip()
+        ):
+            return "accepted panel QA record is invalid"
+    if any(
+        check.get("result") == "fail" and check.get("severity") == "error"
+        for check in checks
+    ):
+        return "error-level panel failure cannot be reused"
+    has_warning = any(
+        check.get("result") == "warning"
+        or (check.get("result") == "fail" and check.get("severity") == "warning")
+        for check in checks
+    )
+    unresolved = record.get("unresolved_warnings")
+    if not isinstance(unresolved, list) or not all(
+        isinstance(item, str) and item.strip() for item in unresolved
+    ):
+        return "accepted panel QA record is invalid"
+    if record.get("decision") == "accept" and (has_warning or unresolved):
+        return "accepted panel QA record is invalid"
+    if record.get("decision") == "accept_with_warnings" and (not has_warning or not unresolved):
+        return "accepted panel QA record is invalid"
+    raw_path = record.get("raw_path")
+    clean_path = record.get("clean_path")
+    raw_hash = record.get("raw_sha256")
+    if not isinstance(raw_path, str) or not isinstance(clean_path, str):
+        return "accepted panel paths are invalid"
+    if (
+        record.get("source_prompt_path") != f"prompts/panels/{panel_id}.txt"
+        or raw_path != f"panels/raw/{panel_id}.png"
+        or clean_path != f"panels/clean/{panel_id}.png"
+    ):
+        return "accepted panel paths do not match the canonical project layout"
+    if not isinstance(raw_hash, str) or SHA256.fullmatch(raw_hash) is None:
+        return "accepted panel hash is invalid"
+    try:
+        raw = _contained_project_path(project_dir, Path(raw_path))
+        clean = _contained_project_path(project_dir, Path(clean_path))
+    except ValueError:
+        return "accepted panel path escapes the project directory"
+    if not raw.is_file():
+        return f"artifact is missing: {raw_path}"
+    if sha256_file(raw) != raw_hash:
+        return f"artifact hash mismatch: {raw_path}"
+    if not clean.is_file():
+        return f"artifact is missing: {clean_path}"
+    try:
+        raw_size = _verify_raster(raw)
+        clean_size = _verify_raster(clean)
+    except ValueError:
+        return "accepted panel image is corrupt"
+    recorded_size = (dimensions.get("width"), dimensions.get("height"))
+    if raw_size != recorded_size or clean_size != raw_size:
+        return "accepted panel dimensions do not match recorded artifacts"
+    return None
+
+
 def build_resume_plan(project_dir: Path) -> list[ResumeAction]:
     """Return a read-only deterministic reuse/repair plan for a generated project."""
-    project_dir = Path(project_dir)
+    project_dir = Path(project_dir).resolve()
     manifest = read_json(project_dir / "project.json")
-    cache = read_json(project_dir / STAGE_CACHE_PATH)
+    cache_path = project_dir / STAGE_CACHE_PATH
+    cache, cache_problem = _load_stage_cache(cache_path)
     cached_stages = cache.get("stages")
-    if not isinstance(cached_stages, dict):
-        raise ValueError("stage cache must contain a stages object")
+    assert isinstance(cached_stages, dict)
     versions = manifest.get("stage_versions")
     if not isinstance(versions, dict):
         raise ValueError("manifest stage_versions must be an object")
-    manifest_paths = {
+    manifest_artifacts = manifest.get("artifacts", {})
+    semantic_manifest_paths = {
         descriptor.get("path")
-        for descriptor in manifest.get("artifacts", {}).values()
-        if isinstance(descriptor, dict) and isinstance(descriptor.get("path"), str)
-    } if isinstance(manifest.get("artifacts"), dict) else set()
+        for name, descriptor in manifest_artifacts.items()
+        if name in {"story_plan", "character_bible", "storyboard"}
+        and isinstance(descriptor, dict)
+        and isinstance(descriptor.get("path"), str)
+    } if isinstance(manifest_artifacts, dict) else set()
     problems = _manifest_artifact_problem(project_dir, manifest)
     stale_from: int | None = None
     stale_reason = ""
@@ -649,7 +919,7 @@ def build_resume_plan(project_dir: Path) -> list[ResumeAction]:
 
     for index, stage in enumerate(RESUME_STAGES):
         cached = cached_stages.get(stage)
-        problem = problems.get(stage)
+        problem = cache_problem if index == 0 and cache_problem is not None else problems.get(stage)
         if not isinstance(cached, dict):
             problem = problem or "stage cache entry is missing"
         else:
@@ -657,16 +927,29 @@ def build_resume_plan(project_dir: Path) -> list[ResumeAction]:
             if not isinstance(artifacts, dict):
                 problem = problem or "cached artifact map is invalid"
             else:
-                for relative, expected_hash in artifacts.items():
-                    if relative in manifest_paths:
-                        continue
-                    path = project_dir / relative
-                    if not path.is_file():
-                        problem = problem or f"artifact is missing: {relative}"
-                        break
-                    if not isinstance(expected_hash, str) or sha256_file(path) != expected_hash:
-                        problem = problem or f"artifact hash mismatch: {relative}"
-                        break
+                try:
+                    expected_artifacts = {
+                        path.relative_to(project_dir).as_posix()
+                        for path in _stage_output_files(project_dir, stage, manifest)
+                    }
+                except (KeyError, OSError, TypeError, ValueError) as error:
+                    problem = problem or f"stage outputs are unavailable: {type(error).__name__}"
+                else:
+                    if set(artifacts) != expected_artifacts:
+                        problem = problem or "cached artifact set does not match stage outputs"
+                    for relative, expected_hash in artifacts.items():
+                        # Canonical semantic edits are accepted through their manifest
+                        # descriptor and invalidate consumers via stage input keys. Final
+                        # generated outputs still must match the cache that produced them.
+                        if relative in semantic_manifest_paths:
+                            continue
+                        path = _contained_project_path(project_dir, Path(relative))
+                        if not path.is_file():
+                            problem = problem or f"artifact is missing: {relative}"
+                            break
+                        if not isinstance(expected_hash, str) or sha256_file(path) != expected_hash:
+                            problem = problem or f"artifact hash mismatch: {relative}"
+                            break
             if problem is None:
                 try:
                     canonical_inputs, files = _resume_stage_material(project_dir, stage, manifest)
@@ -693,18 +976,38 @@ def build_resume_plan(project_dir: Path) -> list[ResumeAction]:
                 temporary.relative_to(project_dir).as_posix(),
                 "interrupted temporary file ignored and preserved",
             ))
+    generation_cache_reusable = any(
+        action.stage == "generation"
+        and action.artifact == "stage"
+        and action.action == "reuse"
+        for action in actions
+    )
     for record_path in sorted((project_dir / "qa/panels").glob("*.json")):
-        record = read_json(record_path)
+        try:
+            record = read_json(record_path)
+        except (OSError, UnicodeError, ValueError) as error:
+            actions.append(ResumeAction(
+                "generation", "regenerate", record_path.stem,
+                f"panel QA record is invalid: {type(error).__name__}",
+            ))
+            continue
         panel_id = record.get("panel_id")
         decision = record.get("decision")
         if not isinstance(panel_id, str):
             continue
         accepted = decision in {"accept", "accept_with_warnings"}
+        panel_problem = _accepted_panel_problem(project_dir, record) if accepted else None
+        if accepted and panel_problem is None and not generation_cache_reusable:
+            panel_problem = "generation stage cache is stale or missing"
         actions.append(ResumeAction(
             "generation",
-            "reuse" if accepted else "regenerate",
+            "reuse" if accepted and panel_problem is None else "regenerate",
             panel_id,
-            "accepted QA artifact is reusable" if accepted else "panel QA requires regeneration",
+            (
+                "accepted QA artifact is reusable"
+                if accepted and panel_problem is None
+                else panel_problem or "panel QA requires regeneration"
+            ),
         ))
     return actions
 
@@ -713,7 +1016,7 @@ def invalidate_from(project_dir: Path, stage: str) -> list[str]:
     """Forget manifest/cache descriptors from a stage onward without deleting artifacts."""
     if stage not in RESUME_STAGES:
         raise ValueError(f"unknown resume stage: {stage}")
-    project_dir = Path(project_dir)
+    project_dir = Path(project_dir).resolve()
     manifest_path = project_dir / "project.json"
     manifest = read_json(manifest_path)
     artifacts = manifest.get("artifacts")
@@ -730,16 +1033,16 @@ def invalidate_from(project_dir: Path, stage: str) -> list[str]:
             del artifacts[name]
     manifest["status"] = STAGE_INVALIDATION_STATUS[stage]
     manifest["updated_at"] = _utc_now()
-    atomic_write_json(manifest_path, manifest)
 
     cache_path = project_dir / STAGE_CACHE_PATH
     if cache_path.is_file():
-        cache = read_json(cache_path)
+        cache, _ = _load_stage_cache(cache_path)
         cached_stages = cache.get("stages")
         if isinstance(cached_stages, dict):
             for downstream in RESUME_STAGES[start:]:
                 cached_stages.pop(downstream, None)
             atomic_write_json(cache_path, cache)
+    atomic_write_json(manifest_path, manifest)
     return removed
 
 
@@ -808,7 +1111,7 @@ def record_generation_attempt(
     }
 
 
-def _verify_raster(path: Path) -> None:
+def _verify_raster(path: Path) -> tuple[int, int]:
     try:
         with Image.open(path) as image:
             if image.format not in {"PNG", "JPEG", "WEBP"}:
@@ -816,7 +1119,8 @@ def _verify_raster(path: Path) -> None:
             image.load()
             if image.width < 512 or image.height < 512:
                 raise ValueError("attempt must be a readable raster at least 512px")
-    except (OSError, SyntaxError) as error:
+            return image.width, image.height
+    except (OSError, SyntaxError, Image.DecompressionBombError) as error:
         raise ValueError("attempt must be a readable raster") from error
 
 
@@ -843,7 +1147,7 @@ def promote_attempt(project_dir: Path, panel_id: str, attempt_path: Path) -> Pat
 
 
 def record_override(project_dir: Path, panel_id: str, reason: str) -> None:
-    """Accept an overridable visual QA failure with an explicit recorded warning."""
+    """Downgrade an overridable visual QA failure to a recorded warning."""
     if not IDENTIFIER.fullmatch(panel_id):
         raise ValueError("invalid panel ID")
     if not isinstance(reason, str) or not reason.strip():
@@ -851,36 +1155,71 @@ def record_override(project_dir: Path, panel_id: str, reason: str) -> None:
     project_dir = Path(project_dir)
     record_path = project_dir / f"qa/panels/{panel_id}.json"
     record = read_json(record_path)
+    if record.get("panel_id") != panel_id:
+        raise ValueError("panel QA record does not match the requested panel")
     category = record.get("failure_category")
     if category in {"corrupt", "corrupt_image", "safety", "safety_refusal"}:
         raise ValueError(f"{category} cannot be overridden")
+    if category != "visual_qa":
+        raise ValueError("only non-safety visual QA errors can be overridden")
+    checks = record.get("checks")
+    failed_checks = [
+        check
+        for check in checks
+        if isinstance(check, dict)
+        and check.get("result") == "fail"
+        and check.get("severity") == "error"
+    ] if isinstance(checks, list) else []
+    if not failed_checks:
+        raise ValueError("override requires an error-level failed check")
+    if record.get("decision") != "regenerate":
+        raise ValueError("overridable visual QA errors must require regeneration")
     raw_path = record.get("raw_path")
-    if not isinstance(raw_path, str):
+    clean_path = record.get("clean_path")
+    if (
+        raw_path != f"panels/raw/{panel_id}.png"
+        or clean_path != f"panels/clean/{panel_id}.png"
+    ):
         raise ValueError("corrupt images cannot be overridden")
     try:
-        _verify_raster(_contained_project_path(project_dir, Path(raw_path)))
-    except ValueError as error:
+        raw = _contained_project_path(project_dir, Path(raw_path))
+        clean = _contained_project_path(project_dir, Path(clean_path))
+        raw_size = _verify_raster(raw)
+        clean_size = _verify_raster(clean)
+        dimensions = record.get("dimensions")
+        recorded_size = (
+            dimensions.get("width"), dimensions.get("height")
+        ) if isinstance(dimensions, dict) else None
+        if (
+            record.get("raw_sha256") != sha256_file(raw)
+            or recorded_size != raw_size
+            or clean_size != raw_size
+        ):
+            raise ValueError("recorded panel artifacts do not match")
+    except (OSError, ValueError) as error:
         raise ValueError("corrupt images cannot be overridden") from error
     warnings = record.get("unresolved_warnings")
     if not isinstance(warnings, list):
         raise ValueError("panel unresolved_warnings must be an array")
-    normalized_reason = reason.strip()
-    if normalized_reason not in warnings:
-        warnings.append(normalized_reason)
-    record["decision"] = "accept_with_warnings"
-    record["retry_reason"] = None
-    atomic_write_json(record_path, record)
-
     manifest_path = project_dir / "project.json"
     manifest = read_json(manifest_path)
     manifest_warnings = manifest.get("warnings")
     if not isinstance(manifest_warnings, list):
         raise ValueError("manifest warnings must be an array")
+    normalized_reason = reason.strip()
+    if normalized_reason not in warnings:
+        warnings.append(normalized_reason)
+    for check in failed_checks:
+        check["severity"] = "warning"
+    record["decision"] = "accept_with_warnings"
+    record["retry_reason"] = None
+    record["override_reason"] = normalized_reason
+    atomic_write_json(record_path, record)
+
     if normalized_reason not in manifest_warnings:
         manifest_warnings.append(normalized_reason)
-    manifest["status"] = "COMPLETE_WITH_WARNINGS"
-    manifest["updated_at"] = _utc_now()
-    atomic_write_json(manifest_path, manifest)
+        manifest["updated_at"] = _utc_now()
+        atomic_write_json(manifest_path, manifest)
     append_event(project_dir, "panel.overridden", {"panel_id": panel_id, "action": "accepted"})
 
 
@@ -983,6 +1322,10 @@ def _build_parser() -> argparse.ArgumentParser:
     invalidate_parser.add_argument("project_dir", type=Path)
     invalidate_parser.add_argument("stage", choices=RESUME_STAGES)
 
+    record_stage_parser = subparsers.add_parser("record-stage")
+    record_stage_parser.add_argument("project_dir", type=Path)
+    record_stage_parser.add_argument("stage", choices=RESUME_STAGES)
+
     attempt_parser = subparsers.add_parser("record-attempt")
     attempt_parser.add_argument("project_dir", type=Path)
     attempt_parser.add_argument("panel_id")
@@ -1044,6 +1387,9 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "invalidate":
             removed = invalidate_from(arguments.project_dir, arguments.stage)
             print("\n".join(removed) if removed else "no manifest artifacts removed")
+        elif arguments.command == "record-stage":
+            recorded = record_stage(arguments.project_dir, arguments.stage)
+            print(f"{recorded['stage']}: recorded {recorded['artifacts']} artifact(s)")
         elif arguments.command == "record-attempt":
             counts = record_generation_attempt(
                 arguments.project_dir, arguments.panel_id, arguments.kind, arguments.path

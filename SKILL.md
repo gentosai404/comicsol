@@ -30,7 +30,8 @@ reporting to the bundled Python scripts.
 2. Ask only a materially required question listed in the workflow reference; otherwise
    apply defaults and continue without confirmation.
 3. Run the local doctor, initialize or inspect the project, then write and validate each
-   semantic artifact before advancing its status.
+   semantic artifact before advancing its status. Persist each completed stage with
+   `record-stage` so resume can reuse honest cache keys.
 4. Detect image capability from tools exposed in the current agent session. Do not ask
    deterministic scripts to discover or call an image provider.
 5. Generate canonical references and panels into attempt paths. Require the image model
@@ -38,8 +39,8 @@ reporting to the bundled Python scripts.
    all seven QA checks, and selectively repair only failures within budget.
 6. Promote accepted attempts; deterministically letter dialogue and captions while
    validating and counting exact storyboard SFX without drawing it in Pillow; compose
-   pages, export PDF, render the QA report, validate final integrity, and transition to
-   the honest terminal status.
+   pages, export PDF, inspect and validate final integrity, transition to the honest
+   terminal status, then render the QA report so it projects that terminal status.
 7. Return status, counts, warnings, and clickable project output paths.
 
 ## Deterministic command route
@@ -56,11 +57,12 @@ python3.11 scripts/validate_project.py PROJECT_DIR --stage plan|storyboard|panel
 
 python3.11 scripts/comic_sol.py resume-plan PROJECT_DIR --json
 python3.11 scripts/comic_sol.py invalidate PROJECT_DIR STAGE
+python3.11 scripts/comic_sol.py record-stage PROJECT_DIR STAGE
 python3.11 scripts/comic_sol.py record-attempt PROJECT_DIR PANEL_ID initial|visual_retry|transient_repeat PATH
 python3.11 scripts/comic_sol.py promote-attempt PROJECT_DIR PANEL_ID PATH
 python3.11 scripts/comic_sol.py override-panel PROJECT_DIR PANEL_ID --reason TEXT
 
-python3.11 scripts/letter_panels.py PANEL_DIR --output-root PATH [--font PATH]
+python3.11 scripts/letter_panels.py PROJECT_DIR [--font PATH]
 python3.11 scripts/compose_pages.py PROJECT_DIR --all
 python3.11 scripts/compose_pages.py PROJECT_DIR --page N
 python3.11 scripts/export_pdf.py PROJECT_DIR [--output PATH]

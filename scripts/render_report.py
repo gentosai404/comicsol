@@ -72,10 +72,10 @@ def summarize_qa(
             record.get("decision") == "accept_with_warnings" for record in panel_records
         ),
         hard_failures=sum(
-            _has_error_failure(record)
-            and (
-                record.get("failure_category") in hard_categories
-                or _attempts(record) >= maximum_retries + 1
+            record.get("failure_category") in hard_categories
+            or (
+                _has_error_failure(record)
+                and _attempts(record) >= maximum_retries + 1
             )
             for record in panel_records
         ),
@@ -158,7 +158,13 @@ def _panel_table(records: list[dict[str, object]]) -> str:
         override = record.get("override_reason")
         if isinstance(override, str) and override:
             decision += f" (override: {override})"
-        results = [str(check_map.get(check_id, {}).get("result", "missing")) for check_id in CHECK_IDS]
+        results = []
+        for check_id in CHECK_IDS:
+            check = check_map.get(check_id, {})
+            result = str(check.get("result", "missing"))
+            if result == "fail" and check.get("severity") == "warning":
+                result += " (warning)"
+            results.append(result)
         evidence = "; ".join(
             f"{check_id}: {check_map[check_id].get('evidence', '')}"
             for check_id in CHECK_IDS if check_id in check_map
@@ -171,16 +177,35 @@ def _panel_table(records: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-def _warnings(records: list[dict[str, object]]) -> str:
-    warnings: list[tuple[str, str]] = []
+def _warnings(
+    manifest: dict[str, object],
+    records: list[dict[str, object]],
+) -> str:
+    warnings: dict[str, list[str]] = {}
+
+    def add_warning(source: str, warning: str) -> None:
+        sources = warnings.setdefault(warning, [])
+        if source not in sources:
+            sources.append(source)
+
     for record in records:
         panel_id = str(record.get("panel_id", "unknown"))
         values = record.get("unresolved_warnings", [])
         if isinstance(values, list):
-            warnings.extend((panel_id, value) for value in values if isinstance(value, str) and value)
+            for value in values:
+                if isinstance(value, str) and value:
+                    add_warning(panel_id, value)
+    manifest_warnings = manifest.get("warnings", [])
+    if isinstance(manifest_warnings, list):
+        for value in manifest_warnings:
+            if isinstance(value, str) and value:
+                add_warning("project", value)
     if not warnings:
         return "No unresolved warnings."
-    return "\n".join(f"- `{panel_id}`: {warning}" for panel_id, warning in warnings)
+    return "\n".join(
+        f"- `{', '.join(sources)}`: {warning}"
+        for warning, sources in warnings.items()
+    )
 
 
 def _relative(project_dir: Path, path: Path) -> str:
@@ -302,7 +327,7 @@ def render_report(project_dir: Path, output_path: Path | None = None) -> Path:
         "{{CAPABILITY}}": _capability(manifest),
         "{{COUNTS}}": _counts(summary),
         "{{PANEL_TABLE}}": _panel_table(records),
-        "{{WARNINGS}}": _warnings(records),
+        "{{WARNINGS}}": _warnings(manifest, records),
         "{{INTEGRITY}}": _integrity(project_dir, manifest, records),
         "{{RESUME}}": _resume(project_dir),
     }

@@ -51,6 +51,10 @@ def panel_record(panel_id, *, attempts=1, decision="accept", warning=None,
         "unresolved_warnings": [warning] if warning else [],
     }
     if override_reason:
+        for check in record["checks"]:
+            if check["result"] == "fail" and check["severity"] == "error":
+                check["severity"] = "warning"
+        record["failure_category"] = "visual_qa"
         record["override_reason"] = override_reason
         record["unresolved_warnings"].append(override_reason)
     return record
@@ -70,7 +74,7 @@ class ReportTests(unittest.TestCase):
             panel_record("p01-01"),
             panel_record("p01-02", decision="accept_with_warnings", warning="Minor prop drift is visible."),
             panel_record("p01-03", attempts=2, decision="regenerate", failing=True),
-            panel_record("p01-04", attempts=2, decision="accept_with_warnings", override_reason="User override: scarf hue differs."),
+            panel_record("p01-04", attempts=2, decision="accept_with_warnings", failing=True, override_reason="User override: scarf hue differs."),
             panel_record("p01-05", attempts=3, decision="regenerate", failing=True),
         ]
         for record in reversed(self.records):
@@ -125,6 +129,13 @@ class ReportTests(unittest.TestCase):
             regenerated_panels=3, accepted_warnings=2, hard_failures=1,
         ), summary)
 
+    def test_safety_category_counts_as_hard_failure_without_failed_check(self):
+        record = panel_record("p01-01", decision="regenerate")
+        record["failure_category"] = "safety_refusal"
+
+        summary = summarize_qa(read_json(self.project / "project.json"), [record])
+        self.assertEqual(1, summary.hard_failures)
+
     def test_report_distinguishes_all_decisions_and_has_no_template_tokens(self):
         output = render_report(self.project)
         text = output.read_text("utf-8")
@@ -150,6 +161,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("1 hard failure", text)
         self.assertIn("Minor prop drift is visible.", text)
         self.assertIn("User override: scarf hue differs.", text)
+        self.assertIn("fail (warning)", text)
         self.assertIn("reference images are unsupported", text)
         self.assertIn("degraded consistency mode", text)
         self.assertIn("provider policies govern transmitted prompts and references", text)
@@ -172,6 +184,35 @@ class ReportTests(unittest.TestCase):
             atomic_write_json(path, record)
         text = render_report(self.project).read_text("utf-8")
         self.assertIn("No unresolved warnings.", text)
+
+    def test_manifest_only_warning_is_reported_once_with_project_source(self):
+        for path in (self.project / "qa/panels").glob("*.json"):
+            record = read_json(path)
+            record["decision"] = "accept"
+            record["retry_reason"] = None
+            record["unresolved_warnings"] = []
+            record.pop("override_reason", None)
+            for check in record["checks"]:
+                check.update({"result": "pass", "severity": "error"})
+            atomic_write_json(path, record)
+        manifest = read_json(self.project / "project.json")
+        manifest["warnings"] = ["Page crop was accepted by the user."]
+        atomic_write_json(self.project / "project.json", manifest)
+
+        text = render_report(self.project).read_text("utf-8")
+        self.assertIn("- `project`: Page crop was accepted by the user.", text)
+        self.assertEqual(1, text.count("Page crop was accepted by the user."))
+        self.assertNotIn("No unresolved warnings.", text)
+
+    def test_duplicate_panel_and_manifest_warning_preserves_both_sources(self):
+        warning = "Minor prop drift is visible."
+        manifest = read_json(self.project / "project.json")
+        manifest["warnings"] = [warning]
+        atomic_write_json(self.project / "project.json", manifest)
+
+        text = render_report(self.project).read_text("utf-8")
+        self.assertIn(f"- `p01-02, project`: {warning}", text)
+        self.assertEqual(1, text.count(warning))
 
     def test_custom_output_cli_atomic_write_and_unresolved_token_failure(self):
         custom = self.project / "deliverables/report.md"

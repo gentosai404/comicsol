@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -25,9 +26,12 @@ from comic_sol import (  # noqa: E402
     read_json,
     record_generation_attempt,
     record_override,
+    record_stage,
     sha256_file,
     stage_cache_key,
+    transition,
 )
+from validate_project import validate_panel_record  # noqa: E402
 
 
 STAGES = ("planning", "storyboard", "generation", "lettering", "composition", "export")
@@ -83,14 +87,16 @@ class ResumeTests(unittest.TestCase):
         self._write_json("plan/character-bible.json", characters)
         self._write_json("plan/storyboard.json", storyboard)
         (self.project / "prompts/panels/p01-01.txt").write_text("panel prompt\n", "utf-8")
+        (self.project / "panels/p01-01").mkdir(exist_ok=True)
         for relative, color in (
             ("references/characters/mira.png", "orange"),
             ("panels/raw/p01-01.png", "navy"),
             ("panels/clean/p01-01.png", "blue"),
-            ("panels/lettered/p01-01.png", "white"),
-            ("pages/page-01.png", "gray"),
+            ("panels/p01-01/lettered.png", "white"),
+            ("pages/page-001.png", "gray"),
         ):
             Image.new("RGB", (512, 512), color).save(self.project / relative)
+        self._write_json("qa/panels/p01-01.json", self._accepted_panel_record())
         (self.project / "qa/report.md").write_text("# QA\n", "utf-8")
         (self.project / "exports/sunlight-courier.pdf").write_bytes(b"%PDF-1.4\nfixture\n")
 
@@ -136,14 +142,28 @@ class ResumeTests(unittest.TestCase):
                 else:
                     item.pop("text", None)
                 visual_panels.append(item)
-            files = [self.project / "prompts/panels/p01-01.txt", self.project / "references/characters/mira.png"]
-            return [visual_panels, characters, manifest["capability"]], files
+            dependencies = []
+            actual_references = []
+            for panel in panels:
+                record = read_json(self.project / f"qa/panels/{panel['id']}.json")
+                references = record["generation"]["reference_paths"]
+                dependencies.append({
+                    "panel_id": panel["id"],
+                    "reference_paths": references,
+                    "source_prompt_path": record["source_prompt_path"],
+                })
+                actual_references.extend(references)
+            relatives = [dependency["source_prompt_path"] for dependency in dependencies]
+            relatives.extend(item["reference_path"] for item in characters["characters"])
+            relatives.extend(actual_references)
+            files = [self.project / relative for relative in dict.fromkeys(relatives)]
+            return [visual_panels, characters, manifest["capability"], dependencies], files
         if stage == "lettering":
             return [[panel["text"] for panel in panels]], [self.project / "panels/clean/p01-01.png"]
         if stage == "composition":
             geometry = [{"number": page["number"], "layout": page["layout"], "panels": [p["rect"] for p in page["panels"]]} for page in storyboard["pages"]]
-            return [geometry], [self.project / "panels/lettered/p01-01.png"]
-        return [{"project_id": manifest["project_id"], "settings": manifest["settings"]}], [self.project / "pages/page-01.png", self.project / "qa/report.md"]
+            return [geometry], [self.project / "panels/p01-01/lettered.png"]
+        return [{"project_id": manifest["project_id"], "settings": manifest["settings"]}], [self.project / "pages/page-001.png", self.project / "qa/report.md"]
 
     def _write_cache_snapshot(self):
         manifest = read_json(self.project / "project.json")
@@ -151,8 +171,8 @@ class ResumeTests(unittest.TestCase):
             "planning": ["plan/story-plan.json", "plan/character-bible.json"],
             "storyboard": ["plan/storyboard.json"],
             "generation": ["panels/raw/p01-01.png", "panels/clean/p01-01.png"],
-            "lettering": ["panels/lettered/p01-01.png"],
-            "composition": ["pages/page-01.png"],
+            "lettering": ["panels/p01-01/lettered.png"],
+            "composition": ["pages/page-001.png"],
             "export": ["qa/report.md", "exports/sunlight-courier.pdf"],
         }
         stages = {}
@@ -277,7 +297,7 @@ class ResumeTests(unittest.TestCase):
         self.assertTrue(all(by_stage[stage] == "rerun" for stage in ("lettering", "composition", "export")))
 
     def test_missing_or_hash_mismatch_invalidates_earliest_owner(self):
-        (self.project / "pages/page-01.png").unlink()
+        (self.project / "pages/page-001.png").unlink()
         actions = build_resume_plan(self.project)
         by_stage = {action.stage: action.action for action in actions if action.artifact == "stage"}
         self.assertEqual("rerun", by_stage["composition"])
@@ -302,10 +322,17 @@ class ResumeTests(unittest.TestCase):
     def test_invalidate_removes_manifest_entries_but_preserves_files(self):
         storyboard_path = self.project / "plan/storyboard.json"
         before = storyboard_path.read_bytes()
-        removed = invalidate_from(self.project, "storyboard")
+        with patch("comic_sol.atomic_write_json", wraps=atomic_write_json) as writer:
+            removed = invalidate_from(self.project, "storyboard")
         self.assertEqual(["storyboard", "qa_report", "pdf"], removed)
         self.assertEqual(before, storyboard_path.read_bytes())
         self.assertNotIn("storyboard", read_json(self.project / "project.json")["artifacts"])
+        self.assertEqual(
+            {"planning"},
+            set(read_json(self.project / "logs/stage-cache.json")["stages"]),
+        )
+        published = [Path(call.args[0]).name for call in writer.call_args_list]
+        self.assertEqual(["stage-cache.json", "project.json"], published)
 
     def test_attempt_is_retained_until_verified_promotion(self):
         attempt = self.project / "panels/raw/p01-01.attempt-2.png"
@@ -348,23 +375,389 @@ class ResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "eight extra calls"):
             record_generation_attempt(project, "p01-01", "transient_repeat", ninth)
 
+    def _failing_panel_record(self, category):
+        check_ids = (
+            "character-identity", "anatomy", "action", "composition",
+            "continuity", "text-free", "technical",
+        )
+        return {
+            "schema_version": "1.0",
+            "panel_id": "p01-01",
+            "source_prompt_path": "prompts/panels/p01-01.txt",
+            "raw_path": "panels/raw/p01-01.png",
+            "clean_path": "panels/clean/p01-01.png",
+            "raw_sha256": sha256_file(self.project / "panels/raw/p01-01.png"),
+            "dimensions": {"height": 512, "width": 512},
+            "attempts": 3,
+            "generation": {
+                "capability_name": "test-image",
+                "completed_at": "2026-07-20T00:00:00Z",
+                "reference_paths": [],
+            },
+            "checks": [
+                {
+                    "id": check_id,
+                    "result": "fail" if check_id == "anatomy" else "pass",
+                    "severity": "error",
+                    "evidence": "hand anatomy is broken" if check_id == "anatomy" else "ok",
+                }
+                for check_id in check_ids
+            ],
+            "decision": "regenerate",
+            "retry_reason": "anatomy repair required",
+            "unresolved_warnings": [],
+            "failure_category": category,
+            "override_reason": None,
+        }
+
+    def _accepted_panel_record(self, reference_paths=None):
+        record = self._failing_panel_record(None)
+        for check in record["checks"]:
+            check.update({"result": "pass", "severity": "error", "evidence": "ok"})
+        record.update({"attempts": 1, "decision": "accept", "retry_reason": None})
+        record["generation"]["reference_paths"] = (
+            ["references/characters/mira.png"]
+            if reference_paths is None else reference_paths
+        )
+        return record
+
     def test_corrupt_and_safety_failures_cannot_be_overridden(self):
         record_path = self.project / "qa/panels/p01-01.json"
-        base = {
-            "panel_id": "p01-01", "decision": "regenerate", "retry_reason": "failed",
-            "unresolved_warnings": [], "raw_path": "panels/raw/p01-01.png",
-        }
         for category in ("corrupt_image", "safety_refusal"):
-            record = dict(base, failure_category=category)
-            atomic_write_json(record_path, record)
+            atomic_write_json(record_path, self._failing_panel_record(category))
             with self.subTest(category=category), self.assertRaisesRegex(ValueError, "cannot be overridden"):
                 record_override(self.project, "p01-01", "accept the visual defect")
 
-        atomic_write_json(record_path, dict(base, failure_category="visual_qa"))
+    def test_only_visual_qa_failures_can_be_overridden(self):
+        record_path = self.project / "qa/panels/p01-01.json"
+        for category in (None, "tool_quota", "transient_error"):
+            atomic_write_json(record_path, self._failing_panel_record(category))
+            with self.subTest(category=category), self.assertRaisesRegex(
+                ValueError, "only non-safety visual QA errors"
+            ):
+                record_override(self.project, "p01-01", "accept the visual defect")
+
+    def test_override_requires_an_error_level_failed_check(self):
+        record_path = self.project / "qa/panels/p01-01.json"
+        record = self._failing_panel_record("visual_qa")
+        for check in record["checks"]:
+            check.update({"result": "pass", "severity": "error"})
+        record.update({"decision": "accept", "retry_reason": None})
+        atomic_write_json(record_path, record)
+
+        with self.assertRaisesRegex(ValueError, "error-level failed check"):
+            record_override(self.project, "p01-01", "nothing failed")
+
+    def test_override_rejects_mismatched_or_corrupt_recorded_artifacts(self):
+        record_path = self.project / "qa/panels/p01-01.json"
+        manifest_path = self.project / "project.json"
+        original_manifest = manifest_path.read_bytes()
+
+        record = self._failing_panel_record("visual_qa")
+        record["raw_sha256"] = "0" * 64
+        atomic_write_json(record_path, record)
+        with self.assertRaisesRegex(ValueError, "corrupt images cannot be overridden"):
+            record_override(self.project, "p01-01", "accept mismatched hash")
+        self.assertEqual("regenerate", read_json(record_path)["decision"])
+        self.assertEqual(original_manifest, manifest_path.read_bytes())
+
+    def test_override_normalizes_pillow_safety_error_as_corrupt_image(self):
+        record_path = self.project / "qa/panels/p01-01.json"
+        manifest_path = self.project / "project.json"
+        original_manifest = manifest_path.read_bytes()
+        atomic_write_json(record_path, self._failing_panel_record("visual_qa"))
+
+        with (
+            patch(
+                "comic_sol.Image.open",
+                side_effect=Image.DecompressionBombError("unsafe dimensions"),
+            ),
+            self.assertRaisesRegex(ValueError, "corrupt images cannot be overridden"),
+        ):
+            record_override(self.project, "p01-01", "must remain blocked")
+
+        record = self._failing_panel_record("visual_qa")
+        atomic_write_json(record_path, record)
+        (self.project / "panels/clean/p01-01.png").write_bytes(b"not an image")
+        with self.assertRaisesRegex(ValueError, "corrupt images cannot be overridden"):
+            record_override(self.project, "p01-01", "accept corrupt clean image")
+        self.assertEqual("regenerate", read_json(record_path)["decision"])
+        self.assertEqual(original_manifest, manifest_path.read_bytes())
+
+    def test_override_downgrades_failure_and_preserves_pipeline_status(self):
+        record_path = self.project / "qa/panels/p01-01.json"
+        atomic_write_json(record_path, self._failing_panel_record("visual_qa"))
+        before = read_json(self.project / "project.json")["status"]
+
         record_override(self.project, "p01-01", "minor prop drift is acceptable")
+
         updated = read_json(record_path)
         self.assertEqual("accept_with_warnings", updated["decision"])
+        self.assertIsNone(updated["retry_reason"])
+        self.assertEqual("minor prop drift is acceptable", updated["override_reason"])
         self.assertIn("minor prop drift is acceptable", updated["unresolved_warnings"])
+        anatomy = next(check for check in updated["checks"] if check["id"] == "anatomy")
+        self.assertEqual({"result": "fail", "severity": "warning"}, {
+            "result": anatomy["result"], "severity": anatomy["severity"],
+        })
+        self.assertEqual([], validate_panel_record(updated))
+
+        manifest = read_json(self.project / "project.json")
+        self.assertEqual(before, manifest["status"])
+        self.assertIn("minor prop drift is acceptable", manifest["warnings"])
+
+    def test_override_warning_selects_warning_terminal_at_final_transition(self):
+        record_path = self.project / "qa/panels/p01-01.json"
+        atomic_write_json(record_path, self._failing_panel_record("visual_qa"))
+        manifest = read_json(self.project / "project.json")
+        manifest["status"] = "QA_READY"
+        atomic_write_json(self.project / "project.json", manifest)
+
+        record_override(self.project, "p01-01", "minor prop drift is acceptable")
+        for status in ("LETTERED", "COMPOSED", "EXPORTED"):
+            transition(self.project, status)
+
+        completed = transition(self.project, "COMPLETE")
+        self.assertEqual("COMPLETE_WITH_WARNINGS", completed["status"])
+
+    def test_resume_plan_without_cache_marks_every_stage_stale(self):
+        (self.project / "logs/stage-cache.json").unlink()
+        actions = build_resume_plan(self.project)
+        stage_actions = [action for action in actions if action.artifact == "stage"]
+        self.assertEqual(6, len(stage_actions))
+        self.assertFalse(any(action.action == "reuse" for action in stage_actions))
+        self.assertEqual("stage cache entry is missing", stage_actions[0].reason)
+        panel = next(action for action in actions if action.artifact == "p01-01")
+        self.assertEqual("regenerate", panel.action)
+        self.assertIn("cache", panel.reason)
+
+    def test_invalid_cache_marks_every_stage_stale_without_raising(self):
+        cache_path = self.project / "logs/stage-cache.json"
+        invalid_payloads = (
+            b"{broken",
+            b"[]\n",
+            b'{"schema_version":"2.0","stages":{}}\n',
+            b'{"schema_version":"1.0","stages":{"planning":{"artifacts":[],"key":"bad"}}}\n',
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                cache_path.write_bytes(payload)
+                stage_actions = [
+                    action
+                    for action in build_resume_plan(self.project)
+                    if action.artifact == "stage"
+                ]
+                self.assertEqual(6, len(stage_actions))
+                self.assertFalse(any(action.action == "reuse" for action in stage_actions))
+                self.assertIn("stage cache is invalid", stage_actions[0].reason)
+
+    def test_record_stage_repairs_invalid_cache_with_canonical_atomic_json(self):
+        cache_path = self.project / "logs/stage-cache.json"
+        cache_path.write_bytes(b"{broken")
+
+        recorded = record_stage(self.project, "planning")
+
+        self.assertEqual("planning", recorded["stage"])
+        cache = read_json(cache_path)
+        self.assertEqual({"schema_version", "stages"}, set(cache))
+        self.assertEqual({"planning"}, set(cache["stages"]))
+        self.assertEqual(
+            (json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            cache_path.read_bytes(),
+        )
+        self.assertEqual([], list(cache_path.parent.glob(f".{cache_path.name}.*.tmp")))
+
+    def test_record_stage_refuses_missing_expected_output(self):
+        (self.project / "plan/story-plan.json").unlink()
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"].pop("story_plan")
+        atomic_write_json(self.project / "project.json", manifest)
+
+        with self.assertRaisesRegex(ValueError, "stage output is missing.*story-plan.json"):
+            record_stage(self.project, "planning")
+
+    def test_record_stage_refuses_stage_without_expected_artifacts(self):
+        storyboard = read_json(self.project / "plan/storyboard.json")
+        storyboard["pages"] = []
+        atomic_write_json(self.project / "plan/storyboard.json", storyboard)
+
+        with self.assertRaisesRegex(ValueError, "storyboard has no panels"):
+            record_stage(self.project, "generation")
+
+    def test_changed_generated_output_hash_is_not_reused(self):
+        Image.new("RGB", (512, 512), "purple").save(
+            self.project / "panels/p01-01/lettered.png"
+        )
+
+        lettering = next(
+            action
+            for action in build_resume_plan(self.project)
+            if action.artifact == "stage" and action.stage == "lettering"
+        )
+        self.assertEqual("rerun", lettering.action)
+        self.assertIn("artifact hash mismatch", lettering.reason)
+
+    def test_manifest_update_cannot_mask_stale_cached_pdf(self):
+        pdf_path = self.project / "exports/sunlight-courier.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nreplaced outside export stage\n")
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"]["pdf"] = self._descriptor(
+            "exports/sunlight-courier.pdf"
+        )
+        atomic_write_json(self.project / "project.json", manifest)
+
+        export = next(
+            action
+            for action in build_resume_plan(self.project)
+            if action.artifact == "stage" and action.stage == "export"
+        )
+        self.assertEqual("rerun", export.action)
+        self.assertIn("artifact hash mismatch", export.reason)
+
+    def test_changed_accepted_panel_hash_is_not_reused(self):
+        record = self._accepted_panel_record()
+        atomic_write_json(self.project / "qa/panels/p01-01.json", record)
+        Image.new("RGB", (512, 512), "purple").save(
+            self.project / "panels/raw/p01-01.png"
+        )
+
+        panel = next(
+            action
+            for action in build_resume_plan(self.project)
+            if action.artifact == "p01-01"
+        )
+        self.assertEqual("regenerate", panel.action)
+        self.assertIn("hash mismatch", panel.reason)
+
+    def test_noncanonical_accepted_panel_paths_are_not_reused(self):
+        alternate_raw = self.project / "panels/raw/alternate.png"
+        alternate_clean = self.project / "panels/clean/alternate.png"
+        shutil.copy2(self.project / "panels/raw/p01-01.png", alternate_raw)
+        shutil.copy2(self.project / "panels/clean/p01-01.png", alternate_clean)
+        record = self._accepted_panel_record()
+        record.update({
+            "raw_path": "panels/raw/alternate.png",
+            "clean_path": "panels/clean/alternate.png",
+            "raw_sha256": sha256_file(alternate_raw),
+        })
+        atomic_write_json(self.project / "qa/panels/p01-01.json", record)
+
+        panel = next(
+            action for action in build_resume_plan(self.project)
+            if action.artifact == "p01-01"
+        )
+        self.assertEqual("regenerate", panel.action)
+        self.assertIn("canonical", panel.reason)
+
+    def test_generation_input_change_prevents_panel_reuse(self):
+        storyboard = read_json(self.project / "plan/storyboard.json")
+        storyboard["pages"][0]["panels"][0]["text"] = [{
+            "id": "p01-01-sfx", "kind": "sfx", "content": "KRAK!",
+        }]
+        atomic_write_json(self.project / "plan/storyboard.json", storyboard)
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"]["storyboard"] = self._descriptor("plan/storyboard.json")
+        atomic_write_json(self.project / "project.json", manifest)
+        record_stage(self.project, "generation")
+
+        storyboard["pages"][0]["panels"][0]["text"][0]["content"] = "BOOM!"
+        atomic_write_json(self.project / "plan/storyboard.json", storyboard)
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"]["storyboard"] = self._descriptor("plan/storyboard.json")
+        atomic_write_json(self.project / "project.json", manifest)
+
+        actions = build_resume_plan(self.project)
+        panel = next(action for action in actions if action.artifact == "p01-01")
+        self.assertEqual("regenerate", panel.action)
+        self.assertIn("cache", panel.reason)
+
+    def test_actual_scene_reference_change_invalidates_generation_and_panel(self):
+        scene_path = self.project / "references/scenes/hall.png"
+        Image.new("RGB", (512, 512), "green").save(scene_path)
+        atomic_write_json(
+            self.project / "qa/panels/p01-01.json",
+            self._accepted_panel_record(["references/scenes/hall.png"]),
+        )
+        record_stage(self.project, "generation")
+        baseline = build_resume_plan(self.project)
+        self.assertEqual(
+            "reuse",
+            next(action for action in baseline if action.artifact == "p01-01").action,
+        )
+
+        Image.new("RGB", (512, 512), "purple").save(scene_path)
+        actions = build_resume_plan(self.project)
+        generation = next(
+            action for action in actions
+            if action.artifact == "stage" and action.stage == "generation"
+        )
+        panel = next(action for action in actions if action.artifact == "p01-01")
+        self.assertEqual("regenerate", generation.action)
+        self.assertEqual("regenerate", panel.action)
+
+    def test_malformed_accepted_panel_record_is_not_reused(self):
+        record = self._accepted_panel_record()
+        record["checks"] = []
+        atomic_write_json(self.project / "qa/panels/p01-01.json", record)
+
+        panel = next(
+            action for action in build_resume_plan(self.project)
+            if action.artifact == "p01-01"
+        )
+        self.assertEqual("regenerate", panel.action)
+        self.assertIn("invalid", panel.reason)
+
+    def test_schema_invalid_override_metadata_is_not_reused(self):
+        record = self._accepted_panel_record()
+        record.update({
+            "failure_category": "visual_qa",
+            "override_reason": "not backed by a warning",
+        })
+        atomic_write_json(self.project / "qa/panels/p01-01.json", record)
+
+        panel = next(
+            action for action in build_resume_plan(self.project)
+            if action.artifact == "p01-01"
+        )
+        self.assertEqual("regenerate", panel.action)
+        self.assertIn("invalid", panel.reason)
+
+    def test_record_stage_roundtrip_enables_honest_reuse(self):
+        (self.project / "logs/stage-cache.json").unlink()
+        for stage in STAGES:
+            recorded = record_stage(self.project, stage)
+            self.assertEqual(stage, recorded["stage"])
+        cache = read_json(self.project / "logs/stage-cache.json")["stages"]
+        self.assertEqual(
+            {"panels/p01-01/lettered.png"},
+            set(cache["lettering"]["artifacts"]),
+        )
+        self.assertEqual(
+            {"pages/page-001.png"},
+            set(cache["composition"]["artifacts"]),
+        )
+        stage_actions = [a for a in build_resume_plan(self.project) if a.artifact == "stage"]
+        self.assertEqual(6, len(stage_actions))
+        self.assertTrue(all(action.action == "reuse" for action in stage_actions))
+
+        story = read_json(self.project / "plan/story-plan.json")
+        story["title"] = "Changed title"
+        atomic_write_json(self.project / "plan/story-plan.json", story)
+        stage_actions = [a for a in build_resume_plan(self.project) if a.artifact == "stage"]
+        self.assertEqual("rerun", stage_actions[0].action)
+        self.assertFalse(any(action.action == "reuse" for action in stage_actions))
+
+    def test_record_and_resume_accept_relative_project_path(self):
+        with contextlib.chdir(self.root):
+            relative_project = Path(self.project.name)
+            for stage in STAGES:
+                record_stage(relative_project, stage)
+            stage_actions = [
+                action
+                for action in build_resume_plan(relative_project)
+                if action.artifact == "stage"
+            ]
+        self.assertTrue(all(action.action == "reuse" for action in stage_actions))
 
     def test_resume_cli_commands_expose_interfaces(self):
         output = io.StringIO()
@@ -373,19 +766,19 @@ class ResumeTests(unittest.TestCase):
         self.assertTrue(json.loads(output.getvalue()))
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(0, main(["invalidate", os.fspath(self.project), "export"]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, main(["record-stage", os.fspath(self.project), "export"]))
 
 
 class ResumeFixtureIntegrationTests(unittest.TestCase):
-    def test_interrupted_fixture_reuses_pass_and_regenerates_only_failure(self):
+    def test_interrupted_fixture_without_cache_regenerates_all_panels_honestly(self):
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "project"
             shutil.copytree(FIXTURES / "interrupted-two-page", project)
-            accepted = sha256_file(project / "panels/clean/p01-01.png")
             actions = build_resume_plan(project)
             panel_actions = {a.artifact: a.action for a in actions if a.artifact.startswith("p")}
-            self.assertEqual("reuse", panel_actions["p01-01"])
+            self.assertEqual("regenerate", panel_actions["p01-01"])
             self.assertEqual("regenerate", panel_actions["p01-02"])
-            self.assertEqual(accepted, sha256_file(project / "panels/clean/p01-01.png"))
 
 
 if __name__ == "__main__":

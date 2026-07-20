@@ -50,11 +50,13 @@
     "height": 0,
     "width": 0
   },
+  "failure_category": null,
   "generation": {
     "capability_name": null,
     "completed_at": null,
     "reference_paths": []
   },
+  "override_reason": null,
   "panel_id": "panel-id",
   "raw_path": null,
   "raw_sha256": null,

@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 
 from comic_sol import (
     ALL_STATUSES,
+    CATEGORY,
     GUTTER,
     MARGIN,
     PAGE_HEIGHT,
@@ -283,7 +284,11 @@ def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
                 _add(issues, path, f"panels[{index}]", "must match pNN-NN")
         if len(set(panels)) != len(panels):
             _add(issues, path, "panels", "panel IDs must be unique")
-    _string_list(root.get("warnings"), issues, path, "warnings")
+    warnings = _string_list(root.get("warnings"), issues, path, "warnings")
+    if root.get("status") == "COMPLETE" and warnings:
+        _add(issues, path, "status", "must be COMPLETE_WITH_WARNINGS while warnings remain")
+    if root.get("status") == "COMPLETE_WITH_WARNINGS" and warnings == []:
+        _add(issues, path, "warnings", "COMPLETE_WITH_WARNINGS requires an unresolved warning")
     return _sorted(issues)
 
 
@@ -600,7 +605,14 @@ def validate_panel_record(data: dict[str, object]) -> list[ValidationIssue]:
         "raw_sha256", "dimensions", "attempts", "generation", "checks",
         "decision", "retry_reason", "unresolved_warnings",
     }
-    root = _object(data, fields, fields, issues, path, "")
+    root = _object(
+        data,
+        fields | {"failure_category", "override_reason"},
+        fields,
+        issues,
+        path,
+        "",
+    )
     if root is None:
         return _sorted(issues)
     if root.get("schema_version") != "1.0":
@@ -671,9 +683,33 @@ def validate_panel_record(data: dict[str, object]) -> list[ValidationIssue]:
         _nonempty_string(retry_reason, issues, path, "retry_reason")
     elif retry_reason is not None:
         _add(issues, path, "retry_reason", "must be null unless regenerating")
+    failure_category = root.get("failure_category")
+    if failure_category is not None and (
+        not isinstance(failure_category, str)
+        or CATEGORY.fullmatch(failure_category) is None
+    ):
+        _add(issues, path, "failure_category", "must be a sanitized category string or null")
+    override_reason = root.get("override_reason")
+    if override_reason is not None:
+        _nonempty_string(override_reason, issues, path, "override_reason")
     unresolved = _string_list(root.get("unresolved_warnings"), issues, path, "unresolved_warnings")
     if decision == "accept_with_warnings" and (not has_warning or not unresolved):
         _add(issues, path, "unresolved_warnings", "accepted warnings require check evidence and user-visible impact")
+    if override_reason is not None:
+        has_overridden_failure = isinstance(checks, list) and any(
+            isinstance(check, dict)
+            and check.get("result") == "fail"
+            and check.get("severity") == "warning"
+            for check in checks
+        )
+        if failure_category != "visual_qa":
+            _add(issues, path, "failure_category", "an override must record visual_qa")
+        if decision != "accept_with_warnings":
+            _add(issues, path, "override_reason", "is allowed only for accept_with_warnings")
+        if not has_overridden_failure:
+            _add(issues, path, "override_reason", "requires a failed check downgraded to warning severity")
+        if unresolved is not None and override_reason not in unresolved:
+            _add(issues, path, "override_reason", "must also appear in unresolved_warnings")
     attempts = root.get("attempts")
     if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > 0:
         for field in ("source_prompt_path", "raw_path", "clean_path"):
@@ -787,7 +823,7 @@ def _validate_raster(
                     _add(issues, issue_path, field, "image aspect ratio differs from storyboard by more than 2%")
             image.verify()
             return width, height
-    except (OSError, UnidentifiedImageError) as error:
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as error:
         _add(issues, issue_path, field, f"image is unreadable: {type(error).__name__}")
         return None
 
@@ -818,6 +854,8 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
     story = None
     characters = None
     storyboard = None
+    panel_errors: list[tuple[str, str]] = []
+    panel_warnings: list[tuple[str, str]] = []
     if needs_plan:
         story = _load_artifact(project_dir, "plan/story-plan.json", validate_story_plan, issues)
         characters = _load_artifact(
@@ -870,6 +908,31 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
             if record is None:
                 continue
             issues.extend(validate_panel_record(record))
+            if stage in {"all", "final"}:
+                checks = record.get("checks")
+                has_error_failure = isinstance(checks, list) and any(
+                    isinstance(check, dict)
+                    and check.get("result") == "fail"
+                    and check.get("severity") == "error"
+                    for check in checks
+                )
+                hard_failure = record.get("failure_category") in {
+                    "corrupt", "corrupt_image", "safety", "safety_refusal",
+                }
+                if record.get("decision") == "regenerate" or has_error_failure or hard_failure:
+                    reason = record.get("retry_reason")
+                    panel_errors.append((
+                        record_relative,
+                        reason if isinstance(reason, str) and reason.strip()
+                        else "panel has an unresolved error",
+                    ))
+                unresolved = record.get("unresolved_warnings")
+                if isinstance(unresolved, list):
+                    panel_warnings.extend(
+                        (record_relative, warning)
+                        for warning in unresolved
+                        if isinstance(warning, str) and warning.strip()
+                    )
             if record.get("panel_id") != panel_id:
                 _add(issues, record_relative, "panel_id", "must match its storyboard panel")
             rect = panel.get("rect")
@@ -934,6 +997,42 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                         _add(issues, "project.json", "input.source_sha256", "hash does not match the source")
 
     if stage in {"all", "final"} and manifest is not None:
+        for record_path, reason in panel_errors:
+            _add(
+                issues,
+                record_path,
+                "decision",
+                f"unresolved panel error blocks final validation: {reason}",
+            )
+        manifest_warnings = manifest.get("warnings")
+        recorded_warnings = {
+            warning
+            for warning in manifest_warnings
+            if isinstance(warning, str)
+        } if isinstance(manifest_warnings, list) else set()
+        for _, warning in panel_warnings:
+            if warning not in recorded_warnings:
+                _add(
+                    issues,
+                    "project.json",
+                    "warnings",
+                    f"must include unresolved panel warning: {warning}",
+                )
+        status = manifest.get("status")
+        if panel_errors and status in {"COMPLETE", "COMPLETE_WITH_WARNINGS"}:
+            _add(
+                issues,
+                "project.json",
+                "status",
+                "cannot be terminal success while unresolved panel errors remain",
+            )
+        if panel_warnings and status == "COMPLETE":
+            _add(
+                issues,
+                "project.json",
+                "status",
+                "must be COMPLETE_WITH_WARNINGS while panel warnings remain",
+            )
         artifacts = manifest.get("artifacts")
         if isinstance(artifacts, dict):
             for name, descriptor in artifacts.items():
