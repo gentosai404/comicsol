@@ -415,51 +415,6 @@ def _known_character(character_bible: list[dict], speaker: object) -> bool:
     )
 
 
-def _wrap_lines(
-    draw: ImageDraw.ImageDraw,
-    content: str,
-    font: ImageFont.FreeTypeFont,
-    maximum_width: int,
-) -> tuple[str, ...]:
-    lines: list[str] = []
-    for paragraph in content.split("\n"):
-        words = paragraph.split()
-        if not words:
-            lines.append("")
-            continue
-        current = words[0]
-        if draw.textbbox((0, 0), current, font=font, stroke_width=0)[2] > maximum_width:
-            return ()
-        for word in words[1:]:
-            candidate = f"{current} {word}"
-            bounds = draw.textbbox((0, 0), candidate, font=font, stroke_width=0)
-            if bounds[2] - bounds[0] <= maximum_width:
-                current = candidate
-            else:
-                lines.append(current)
-                current = word
-                if draw.textbbox((0, 0), current, font=font, stroke_width=0)[2] > maximum_width:
-                    return ()
-        lines.append(current)
-    return tuple(lines)
-
-
-def _line_metrics(
-    draw: ImageDraw.ImageDraw,
-    lines: tuple[str, ...],
-    font: ImageFont.FreeTypeFont,
-    spacing: int = 6,
-) -> tuple[int, int]:
-    widths: list[int] = []
-    heights: list[int] = []
-    for line in lines:
-        sample = line or "Ag"
-        left, top, right, bottom = draw.textbbox((0, 0), sample, font=font)
-        widths.append(right - left if line else 0)
-        heights.append(bottom - top)
-    return max(widths, default=0), sum(heights) + spacing * max(0, len(lines) - 1)
-
-
 def _anchor_rect(anchor: str, width: int, height: int) -> dict[str, int]:
     inset_x = max(4, round(width * 0.04))
     inset_y = max(4, round(height * 0.04))
@@ -574,39 +529,25 @@ def _ellipse_tail_polygon(
     return base_one, base_two, (target_x, target_y)
 
 
-def _item_font_and_lines(
+def _item_font(
     draw: ImageDraw.ImageDraw,
     item: dict,
     rect: dict[str, int],
-) -> tuple[ImageFont.FreeTypeFont, tuple[str, ...]]:
+) -> ImageFont.FreeTypeFont:
     kind = item.get("kind")
-    padding = 24 if kind == "dialogue" else 20 if kind == "caption" else 8
-    start_size = 64 if kind == "sfx" else 42
+    padding = 24 if kind == "dialogue" else 20
     content = normalize_content(item.get("content", ""))
-    for size in range(start_size, 23, -2):
+    for size in range(42, 23, -2):
         font = _load_font(size)
-        if kind in {"dialogue", "caption"}:
-            layout = _layout_styled_text(
-                draw,
-                content,
-                font,
-                max(1, rect["width"] - 2 * padding),
-                emphasis=kind == "dialogue",
-            )
-            if layout is None:
-                continue
-            if layout.height <= rect["height"] - 2 * padding:
-                return font, tuple(
-                    "".join(text for text, _ in line.runs)
-                    for line in layout.lines
-                )
-            continue
-        lines = _wrap_lines(draw, content, font, max(1, rect["width"] - 2 * padding))
-        if not lines:
-            continue
-        text_width, text_height = _line_metrics(draw, lines, font)
-        if text_width <= rect["width"] - 2 * padding and text_height <= rect["height"] - 2 * padding:
-            return font, lines
+        layout = _layout_styled_text(
+            draw,
+            content,
+            font,
+            max(1, rect["width"] - 2 * padding),
+            emphasis=kind == "dialogue",
+        )
+        if layout is not None and layout.height <= rect["height"] - 2 * padding:
+            return font
     item_id = item.get("id", "unknown")
     raise ValueError(f"text item {item_id} does not fit inside the panel")
 
@@ -636,33 +577,21 @@ def render_text_item(
     x1 = min(image_width - 1, x0 + max(1, int(rect["width"])))
     y1 = min(image_height - 1, y0 + max(1, int(rect["height"])))
     bounded = {"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}
-    padding = 24 if kind == "dialogue" else 20 if kind == "caption" else 8
-    layout = None
-    if kind in {"dialogue", "caption"}:
-        layout = _layout_styled_text(
-            draw,
-            content,
-            font,
-            max(1, bounded["width"] - 2 * padding),
-            emphasis=kind == "dialogue",
-        )
-        if layout is None:
-            raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
-        text_width, text_height = layout.width, layout.height
-        lines: tuple[str, ...] = ()
-    else:
-        lines = _wrap_lines(draw, content, font, max(1, bounded["width"] - 2 * padding))
-        if not lines:
-            raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
-        text_width, text_height = _line_metrics(draw, lines, font)
+    padding = 24 if kind == "dialogue" else 20
+    layout = _layout_styled_text(
+        draw,
+        content,
+        font,
+        max(1, bounded["width"] - 2 * padding),
+        emphasis=kind == "dialogue",
+    )
+    if layout is None:
+        raise ValueError(f"text item {item.get('id', 'unknown')} cannot be wrapped")
+    text_width, text_height = layout.width, layout.height
     text_x = x0 + max(padding, (bounded["width"] - text_width) // 2)
-    if kind in {"dialogue", "caption"}:
-        text_y = y0 + max(padding, (bounded["height"] - text_height) / 2)
-        if kind == "caption":
-            text_y = y0 + max(0, (bounded["height"] - text_height) / 2)
-    else:
-        text_y = y0 + max(padding, (bounded["height"] - text_height) // 2)
-    rendered = "\n".join(lines)
+    text_y = y0 + max(padding, (bounded["height"] - text_height) / 2)
+    if kind == "caption":
+        text_y = y0 + max(0, (bounded["height"] - text_height) / 2)
 
     if kind == "dialogue":
         tail = item.get("tail_target")
@@ -778,7 +707,7 @@ def letter_panel(
             candidate = _anchor_rect(candidate_anchor, panel_width, panel_height)
             candidate_item = dict(item)
             candidate_item["anchor"] = candidate_anchor
-            candidate_font, _ = _item_font_and_lines(draw, candidate_item, candidate)
+            candidate_font = _item_font(draw, candidate_item, candidate)
             fitted = _fitted_item_rect(draw, candidate_item, candidate, candidate_font)
             if not any(_overlap(fitted, prior) for prior in occupied):
                 rect = fitted

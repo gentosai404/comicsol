@@ -61,6 +61,19 @@ class CompositionTests(unittest.TestCase):
             self.assertEqual((255, 255, 255), page.getpixel((32, 32)))
             self.assertEqual((255, 255, 255), page.getpixel((800, 1200)))
 
+    def test_panels_have_inward_six_pixel_black_borders(self):
+        path = compose_page(self.project, 1, self.storyboard, self.settings, {})
+        with Image.open(path) as page:
+            for offset in range(6):
+                self.assertEqual((0, 0, 0), page.getpixel((64 + offset, 624)))
+                self.assertEqual((0, 0, 0), page.getpixel((1535 - offset, 624)))
+                self.assertEqual((0, 0, 0), page.getpixel((800, 64 + offset)))
+                self.assertEqual((0, 0, 0), page.getpixel((800, 1183 - offset)))
+            self.assertEqual((255, 255, 255), page.getpixel((63, 624)))
+            self.assertEqual((255, 255, 255), page.getpixel((800, 1184)))
+            self.assertEqual((255, 0, 0), page.getpixel((70, 624)))
+            self.assertEqual((255, 0, 0), page.getpixel((800, 70)))
+
     def test_cover_crop_is_centered_and_preserves_aspect_ratio(self):
         source = Image.new("RGB", (1200, 600), "blue")
         for x in range(100):
@@ -69,8 +82,8 @@ class CompositionTests(unittest.TestCase):
         source.save(self.project / "panels/p01-01/lettered.png")
         path = compose_page(self.project, 1, self.storyboard, self.settings, {})
         with Image.open(path) as page:
-            self.assertEqual((0, 0, 255), page.getpixel((64, 624)))
-            self.assertEqual((0, 0, 255), page.getpixel((1535, 624)))
+            self.assertEqual((0, 0, 255), page.getpixel((70, 624)))
+            self.assertEqual((0, 0, 255), page.getpixel((1529, 624)))
 
     def test_missing_panel_names_id_and_writes_no_page(self):
         (self.project / "panels/p01-02/lettered.png").unlink()

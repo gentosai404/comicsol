@@ -382,7 +382,7 @@ class LetteringTests(unittest.TestCase):
         from letter_panels import (
             _ellipse_tail_polygon,
             _fitted_item_rect,
-            _item_font_and_lines,
+            _item_font,
             _layout_styled_text,
         )
 
@@ -390,14 +390,14 @@ class LetteringTests(unittest.TestCase):
         draw = ImageDraw.Draw(image)
         maximum = {"x": 32, "y": 40, "width": 336, "height": 300}
         short = dialogue("Go!")
-        short_font, _ = _item_font_and_lines(draw, short, maximum)
+        short_font = _item_font(draw, short, maximum)
         short_rect = _fitted_item_rect(draw, short, maximum, short_font)
         short_layout = _layout_styled_text(
             draw, short["content"], short_font, maximum["width"] - 48
         )
         self.assertIsNotNone(short_layout)
         long = dialogue("The service bridge is collapsing beneath us now!")
-        long_font, _ = _item_font_and_lines(draw, long, maximum)
+        long_font = _item_font(draw, long, maximum)
         long_rect = _fitted_item_rect(draw, long, maximum, long_font)
 
         self.assertLess(short_rect["width"], maximum["width"])
@@ -521,13 +521,13 @@ class LetteringTests(unittest.TestCase):
         self.assertIsNone(bottom.getbbox())
 
     def test_caption_is_compact_light_strip_fitted_at_top(self):
-        from letter_panels import _fitted_item_rect, _item_font_and_lines
+        from letter_panels import _fitted_item_rect, _item_font
 
         image = Image.new("RGB", (800, 1000), (28, 32, 40))
         draw = ImageDraw.Draw(image)
         item = caption("A quiet beat.")
         maximum = {"x": 32, "y": 40, "width": 336, "height": 300}
-        font, _ = _item_font_and_lines(draw, item, maximum)
+        font = _item_font(draw, item, maximum)
         fitted = _fitted_item_rect(draw, item, maximum, font)
 
         self.assertEqual((maximum["x"], maximum["y"]), (fitted["x"], fitted["y"]))
@@ -558,14 +558,14 @@ class LetteringTests(unittest.TestCase):
         )
 
     def test_caption_uses_per_character_noto_fallback(self):
-        from letter_panels import _fitted_item_rect, _item_font_and_lines
+        from letter_panels import _fitted_item_rect, _item_font
 
         image = Image.new("RGB", (800, 1000), (28, 32, 40))
         draw = ImageDraw.Draw(image)
         unsupported = "\u0378"
         item = caption(f"A ΩЖ {unsupported}")
         maximum = {"x": 32, "y": 40, "width": 336, "height": 300}
-        font, _ = _item_font_and_lines(draw, item, maximum)
+        font = _item_font(draw, item, maximum)
         fitted = _fitted_item_rect(draw, item, maximum, font)
         captured_runs = []
 

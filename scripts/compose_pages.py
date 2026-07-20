@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from comic_sol import PAGE_HEIGHT, PAGE_WIDTH, atomic_write_bytes, read_json
 
@@ -102,6 +102,7 @@ def _compose_to_bytes(
     manifest_settings: dict,
 ) -> bytes:
     canvas = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), _background_color(manifest_settings))
+    draw = ImageDraw.Draw(canvas)
     for panel, source_path in sources:
         x, y, width, height = _rect(panel)
         try:
@@ -118,6 +119,11 @@ def _compose_to_bytes(
                 f"panel {panel.get('id')} is not a readable image"
             ) from error
         canvas.paste(fitted, (x, y))
+        draw.rectangle(
+            (x, y, x + width - 1, y + height - 1),
+            outline=(0, 0, 0),
+            width=6,
+        )
     encoded = io.BytesIO()
     canvas.save(encoded, format="PNG", optimize=False, compress_level=9)
     return encoded.getvalue()
