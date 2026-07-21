@@ -198,7 +198,7 @@ project recovery error. Resuming reused the four reviewed courier panels and
 completed. A second resume returned 10 `reuse` actions and preserved the hashes and
 nanosecond mtimes of all 33 files exactly.
 
-The rendered demo is **1:49.13** (1920×1080, H.264/AAC), below the three-minute
+The rendered demo is **1:46.905** (1920×1080, H.264/AAC), below the three-minute
 limit. It uses only committed Comic Sol artifacts and deterministic evidence. The
 `/feedback` command was run in the final Codex session and confirmed uploaded
 ("Feedback uploaded. Thanks for the feedback!"), returning the real feedback

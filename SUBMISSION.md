@@ -68,7 +68,7 @@ Expected evidence:
 
 > Make a 2-page manga about a courier delivering sunlight to an underground city.
 
-## Demo script — 1:49.13 rendered runtime
+## Demo outline — 1:46.905 final rendered runtime
 
 1. **0:00–0:12 — Problem and product**
    - Show repository and installed `comic-sol` skill.
@@ -85,7 +85,7 @@ Expected evidence:
 5. **1:13–1:34 — Resume and repair**
    - Run `resume-plan` on `samples/sunlight-courier`.
    - Show all ten actions reusable; explain one failed panel can be regenerated without restarting.
-6. **1:34–1:49 — Evidence and close**
+6. **1:34–1:46 — Evidence and close**
    - Run `doctor` or show 137-test result.
    - Finish on the two-page PDF and public GitHub URL.
 
