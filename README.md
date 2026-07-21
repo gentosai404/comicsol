@@ -38,33 +38,6 @@ py -3.11 -m pip install -r requirements.txt
 Supported environments are Linux, macOS, Windows, and WSL with Python 3.11 and
 Pillow 11.3.0. The deterministic test suite does not need an image provider.
 
-## Native Hermes MCP Server (Optional)
-
-Comic Sol includes an optional `stdio` MCP server that exposes the deterministic pipeline as standard tools for Hermes Agent, Claude Desktop, Cursor, or any MCP client.
-
-To run the MCP adapter, install the SDK alongside Pillow:
-
-```bash
-python3.11 -m venv ~/.venvs/comic-sol-mcp
-~/.venvs/comic-sol-mcp/bin/pip install -r requirements.txt -r requirements-mcp.txt
-```
-
-Register the server in your Hermes configuration (`~/.hermes/config.yaml`), locking it to a secure output directory:
-
-```yaml
-mcp_servers:
-  comic-sol:
-    command: "/home/acer/.venvs/comic-sol-mcp/bin/python"
-    args:
-      - "/mnt/c/Users/acer/Projects/comic-sol/scripts/mcp_server.py"
-      - "--root"
-      - "/home/acer/comic-sol-output"
-    sampling:
-      enabled: false
-```
-
-Restart Hermes to discover the 14 `comic_*` tools.
-
 ## Invoke
 
 Open Codex with the skill installed and say, for example:
@@ -168,7 +141,6 @@ py -3.11 -m venv "$TempRoot\venv"
 | Lettering | Comic Neue Regular/Bold; per-character Noto Sans fallback | Adaptive oval dialogue, actual inline bold emphasis, compact captions, and hybrid authored SFX are supported. Font licenses and digests are in `assets/README.md`. |
 | Image generation | Agent-exposed image model returning a local raster | References and exact dimensions are used when supported; exact authored SFX is checked by visual QA. |
 | Deterministic scripts | Python 3.11 and Pillow 11.3.0 | Offline and provider-neutral. |
-| Native MCP | Python 3.11 and MCP SDK 1.28.1 via `stdio` | Exposes 14 tools covering the full deterministic lifecycle safely locked to one output root. |
 
 ## Privacy, IP, and Limitations
 
