@@ -5,7 +5,7 @@ Generated deterministically from the project manifest and per-panel QA records.
 ## Project summary
 
 - Project: Sunlight Courier (`sunlight-courier`)
-- Final status: **EXPORTED**
+- Final status: **COMPLETE**
 
 ## Capability
 
@@ -40,10 +40,11 @@ No unresolved warnings.
 ## Artifact integrity
 
 - `plan/character-bible.json` — exists: yes; hash: `86f6568201ebb3f499388b0a2844ebee747bf69a15971ade5d1542c7a2fb621a`; hash matches: yes
+- `exports/sunlight-courier.pdf` — exists: yes; hash: `7fc073bae781af2a4dfa0e6f800757a0a0f3141de25bc722a84afdbc8c964fe2`; hash matches: yes
 - `plan/story-plan.json` — exists: yes; hash: `582838313c63ffe1f700289124e46203dc93f77d20aa46200d6437053f7e83a9`; hash matches: yes
-- `plan/storyboard.json` — exists: yes; hash: `59db68da132ee7aea75aa929cd1315c0c31a9fa8dbc30c20a0a3123665291a01`; hash matches: yes
-- `pages/page-001.png` — dimensions: 1600×2400; valid page: yes; sha256: `b7013c5b782ee037e5c3f9d5b71d2e0d578995ef51a1568a6cc8cd6145f4cd47`
-- `pages/page-002.png` — dimensions: 1600×2400; valid page: yes; sha256: `4a71bd01e0fdbbd4b41d63d34b5648e9920cbf9a8f7ca43194a219f471e55f36`
+- `plan/storyboard.json` — exists: yes; hash: `ef5bba8521b06cb7614c477f5d11f21f0da4d92a4312524620804c7dbaa15fa3`; hash matches: yes
+- `pages/page-001.png` — dimensions: 1600×2400; valid page: yes; sha256: `8733079f991e14355a83a399b41dd8467a6981dcb9c65423f2522a7bb8479ada`
+- `pages/page-002.png` — dimensions: 1600×2400; valid page: yes; sha256: `96fbfb1f7b35f2bac7fe92ef0378e6c030fcf9a71a01f66accec918f1da39205`
 - Reference `references/characters/mira.png` — valid: yes
 - `exports/sunlight-courier.pdf` — PDF readable: yes; pages: 2
 

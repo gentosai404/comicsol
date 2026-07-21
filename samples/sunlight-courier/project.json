@@ -6,11 +6,11 @@
     },
     "pdf": {
       "path": "exports/sunlight-courier.pdf",
-      "sha256": "d3416dcf082f15c36aded16c53168517fad9d253f1038b341d24195a6fa02062"
+      "sha256": "7fc073bae781af2a4dfa0e6f800757a0a0f3141de25bc722a84afdbc8c964fe2"
     },
     "qa_report": {
       "path": "qa/report.md",
-      "sha256": "635ca61dccf2e882d244257e2b4fdb443b388315aaccb53d6aea517626501953"
+      "sha256": "77739987a1a09559df7b31e4aa66d4e4617fd0e1310128c35b56f22fca8e1270"
     },
     "story_plan": {
       "path": "plan/story-plan.json",
@@ -18,7 +18,7 @@
     },
     "storyboard": {
       "path": "plan/storyboard.json",
-      "sha256": "59db68da132ee7aea75aa929cd1315c0c31a9fa8dbc30c20a0a3123665291a01"
+      "sha256": "ef5bba8521b06cb7614c477f5d11f21f0da4d92a4312524620804c7dbaa15fa3"
     }
   },
   "capability": {
@@ -57,7 +57,7 @@
     "composition": "1",
     "export": "1",
     "generation": "1",
-    "lettering": "1",
+    "lettering": "2",
     "planning": "1",
     "storyboard": "1"
   },

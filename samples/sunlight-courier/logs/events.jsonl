@@ -2,3 +2,8 @@
 {"details":{"from":"LETTERED","to":"COMPOSED","warning_present":false},"event":"project.transitioned","timestamp":"2026-07-18T08:01:16Z"}
 {"details":{"from":"COMPOSED","to":"EXPORTED","warning_present":false},"event":"project.transitioned","timestamp":"2026-07-18T08:01:17Z"}
 {"details":{"from":"EXPORTED","to":"COMPLETE","warning_present":false},"event":"project.transitioned","timestamp":"2026-07-18T08:01:18Z"}
+{"details":{"action":"storyboard"},"event":"stage.recorded","timestamp":"2026-07-21T03:28:48Z"}
+{"details":{"action":"generation"},"event":"stage.recorded","timestamp":"2026-07-21T03:28:50Z"}
+{"details":{"action":"lettering"},"event":"stage.recorded","timestamp":"2026-07-21T03:28:52Z"}
+{"details":{"action":"composition"},"event":"stage.recorded","timestamp":"2026-07-21T03:28:57Z"}
+{"details":{"action":"export"},"event":"stage.recorded","timestamp":"2026-07-21T03:28:59Z"}

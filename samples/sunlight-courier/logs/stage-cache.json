@@ -3,17 +3,17 @@
   "stages": {
     "composition": {
       "artifacts": {
-        "pages/page-001.png": "b7013c5b782ee037e5c3f9d5b71d2e0d578995ef51a1568a6cc8cd6145f4cd47",
-        "pages/page-002.png": "4a71bd01e0fdbbd4b41d63d34b5648e9920cbf9a8f7ca43194a219f471e55f36"
+        "pages/page-001.png": "8733079f991e14355a83a399b41dd8467a6981dcb9c65423f2522a7bb8479ada",
+        "pages/page-002.png": "96fbfb1f7b35f2bac7fe92ef0378e6c030fcf9a71a01f66accec918f1da39205"
       },
-      "key": "c36e433dd948e8face63c53a93b14937f01d04a04577a99c262656aa2d179881"
+      "key": "60249b1ea1975de6acd7693e50653b597108ad1cc2c3a943be78dff25f524c0e"
     },
     "export": {
       "artifacts": {
-        "exports/sunlight-courier.pdf": "d3416dcf082f15c36aded16c53168517fad9d253f1038b341d24195a6fa02062",
-        "qa/report.md": "635ca61dccf2e882d244257e2b4fdb443b388315aaccb53d6aea517626501953"
+        "exports/sunlight-courier.pdf": "7fc073bae781af2a4dfa0e6f800757a0a0f3141de25bc722a84afdbc8c964fe2",
+        "qa/report.md": "77739987a1a09559df7b31e4aa66d4e4617fd0e1310128c35b56f22fca8e1270"
       },
-      "key": "ddb0340b44fb6f64f0c57e124274b70129dc96d01058ec3b13dce582181e3c59"
+      "key": "ec684fff341469f8d7f941c973833c1f4f8c60089fd1a67cd4b5322524e9fefd"
     },
     "generation": {
       "artifacts": {
@@ -26,16 +26,16 @@
         "panels/raw/p02-01.png": "071bc3933f0459c0d5286d4687e9ae7ba0804e6be97f9bc07cf30133e8f4e0da",
         "panels/raw/p02-02.png": "3c7a83b584f69e0c9288d67f14643f71fb49a10e089585a66d9cd52731469e55"
       },
-      "key": "3b30837eb2392e9fdd9c5f3bd2b5328896b0f6f6c1015f31bc1dd2b7076815b7"
+      "key": "fe794cb210d8432216226ed6a7138fe4f1d57b207401727f5d796f17154ee14a"
     },
     "lettering": {
       "artifacts": {
-        "panels/p01-01/lettered.png": "0226d4832879bc300f01522e0699e7e47a98d0bad014277e0dd764fc31546fcd",
-        "panels/p01-02/lettered.png": "b33518549f631d90b89afb7d8c6386931c7440e679982f103cb40ac41e615798",
-        "panels/p02-01/lettered.png": "4e9c5514b71616588b6f4c12a2884cc522b320c6d9994a37293908dcc4d8c723",
-        "panels/p02-02/lettered.png": "851675d2fc06b5ae6eed6ebb5392962573cb0d687c2f849d8cc99aef63509bea"
+        "panels/p01-01/lettered.png": "c9f39ab3a099835f82ea07e0d94d7805a20d8c3b57ad0353326a87b7b5e4e50c",
+        "panels/p01-02/lettered.png": "146e7853227f446c37c7934b86d2c6b8bd7b5b478db917d4a680187a96617ad0",
+        "panels/p02-01/lettered.png": "19fbe56e647b1db31e21b7f923053fd3aa092db7518251a9f37c8274eddafb05",
+        "panels/p02-02/lettered.png": "bd4c1a7e012ce15f0700175f5511917899a53820b1c832e9b0d92433e680c062"
       },
-      "key": "81afabdd70c03b8586bba3e605194c59d7cc3083dec57583f60e0deb5786214d"
+      "key": "2a5dcc83be529b82ca740f43fbc14580ee4f5cedbf2e52e0fee18385e093037d"
     },
     "planning": {
       "artifacts": {
@@ -46,7 +46,7 @@
     },
     "storyboard": {
       "artifacts": {
-        "plan/storyboard.json": "59db68da132ee7aea75aa929cd1315c0c31a9fa8dbc30c20a0a3123665291a01"
+        "plan/storyboard.json": "ef5bba8521b06cb7614c477f5d11f21f0da4d92a4312524620804c7dbaa15fa3"
       },
       "key": "7bacfea325941232b5dcbc6c84263a2c685284868dd87c88173912f22358452f"
     }

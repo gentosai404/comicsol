@@ -12,27 +12,27 @@ Requirements are Python 3.11 and `Pillow==11.3.0`. Image creation additionally
 requires an image-generation capability exposed to the active agent session; Comic
 Sol never embeds provider credentials.
 
-Clone the public repository, install the one pinned dependency, then either use the
-checkout directly or copy it into your Codex skills directory:
+Clone the public repository directly into the Codex skills directory, then install
+the one pinned dependency:
 
 ```bash
-git clone https://github.com/wenn-id/comic-sol.git
-cd comic-sol
-python3.11 -m pip install Pillow==11.3.0
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
-cp -R . "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol/"
+git clone https://github.com/wenn-id/comic-sol.git \
+  "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
+cd "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
+python3.11 -m pip install -r requirements.txt
 ```
 
-The host-agnostic rule is: copy this repository as one `comic-sol` folder beneath
+The host-agnostic rule is: install this repository as one `comic-sol` folder beneath
 the Codex skills directory configured by your Codex installation. Keep `SKILL.md`,
 `scripts/`, `references/`, `templates/`, and `assets/` together.
 
 Windows PowerShell:
 
 ```powershell
-py -3.11 -m pip install Pillow==11.3.0
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills\comic-sol"
-Copy-Item -Recurse -Force .\* "$env:USERPROFILE\.codex\skills\comic-sol"
+git clone https://github.com/wenn-id/comic-sol.git `
+  "$env:USERPROFILE\.codex\skills\comic-sol"
+Set-Location "$env:USERPROFILE\.codex\skills\comic-sol"
+py -3.11 -m pip install -r requirements.txt
 ```
 
 Supported environments are Linux, macOS, Windows, and WSL with Python 3.11 and
@@ -206,8 +206,8 @@ Session ID (Thread ID): `019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.
 
 A fresh native Windows 11 clean-room run used Python 3.11.9, installed Pillow
 11.3.0 in a new virtual environment, cloned the public repository, passed `doctor`,
-and ran **82 tests successfully** (`OK`, one symlink-privilege test skipped). Linux/WSL
-also runs **82/82 tests successfully**.
+and ran **137 tests successfully** (`OK`, one symlink-privilege test skipped). Linux/WSL
+also runs **137/137 tests successfully**.
 
 ## Build Week evidence and pre-submission checklist
 
