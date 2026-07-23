@@ -933,7 +933,7 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
             if record is None:
                 continue
             issues.extend(validate_panel_record(record))
-            if stage in {"all", "final"}:
+            if stage in {"all", "final", "export-ready"}:
                 checks = record.get("checks")
                 has_error_failure = isinstance(checks, list) and any(
                     isinstance(check, dict)

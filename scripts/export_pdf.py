@@ -14,9 +14,9 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-from comic_sol import PAGE_HEIGHT, PAGE_WIDTH, read_json
+from comic_sol import PAGE_HEIGHT, PAGE_WIDTH, read_json, atomic_write_json, sha256_file
 from project_io import durable_atomic_write
-from validate_project import validate_manifest
+from validate_project import validate_manifest, require_valid_project
 
 
 PAGE_PATTERN = re.compile(r"^page-([0-9]{3})\.png$")
@@ -209,6 +209,24 @@ def export_pdf(project_dir: Path, output_path: Path | None = None) -> Path:
                 temporary_path.unlink()
             except FileNotFoundError:
                 pass
+
+
+def guarded_export(project_dir: Path, output_path: Path | None = None) -> Path:
+    """Require export-ready validation before exporting, then record descriptor."""
+    project_dir = Path(project_dir)
+    require_valid_project(project_dir, "export-ready")
+    destination = export_pdf(project_dir, output_path)
+    manifest = read_json(project_dir / "project.json")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    artifacts["pdf"] = {
+        "path": str(destination.relative_to(project_dir)),
+        "sha256": sha256_file(destination),
+    }
+    manifest["artifacts"] = artifacts
+    atomic_write_json(project_dir / "project.json", manifest)
+    return destination
 
 
 def _build_parser() -> argparse.ArgumentParser:

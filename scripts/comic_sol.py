@@ -447,6 +447,9 @@ def transition(
         target = "COMPLETE_WITH_WARNINGS"
     if not isinstance(current, str) or not _allowed_transition(current, target):
         raise ValueError(f"invalid Comic Sol transition: {current} -> {target}")
+    if target in TERMINAL_STATUSES:
+        from validate_project import require_valid_project
+        require_valid_project(project_dir, "final")
     if target == "COMPLETE_WITH_WARNINGS" and not (warnings or warning):
         raise ValueError("COMPLETE_WITH_WARNINGS requires an unresolved warning")
     if warning and warning not in warnings:

@@ -232,15 +232,219 @@ class GuardedOperationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
+    def _add_panel_files(self):
+        (self.project / "prompts/panels/p01-01.txt").write_text(
+            "panel prompt", encoding="utf-8"
+        )
+        Image.new("RGB", (512, 512), "white").save(
+            self.project / "references/characters/mira.png"
+        )
+        raw = self.project / "panels/raw/p01-01.png"
+        clean = self.project / "panels/clean/p01-01.png"
+        Image.new("RGB", (736, 1136), (20, 30, 40)).save(raw)
+        Image.new("RGB", (736, 1136), (20, 30, 40)).save(clean)
+        record = valid_panel_record()
+        record["raw_sha256"] = sha256_file(raw)
+        atomic_write_json(self.project / "qa/panels/p01-01.json", record)
+
+    def _add_lettered_page_qas(self):
+        (self.project / "pages").mkdir(exist_ok=True)
+        page_png = self.project / "pages/page-001.png"
+        Image.new("RGB", (1600, 2400), (100, 150, 200)).save(page_png)
+        page_hash = sha256_file(page_png)
+        page_qa = self.project / "qa/pages/page-001.json"
+        page_qa.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        atomic_write_json(
+            page_qa,
+            {
+                "page": 1,
+                "page_path": "pages/page-001.png",
+                "page_sha256": page_hash,
+                "schema_version": "1.0",
+                "status": "reviewed",
+            },
+        )
+        lettered = self.project / "panels/lettered/p01-01.png"
+        lettered.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (736, 1136), (10, 20, 30)).save(lettered)
+
+    def _make_export_ready(self):
+        self._add_panel_files()
+        self._add_lettered_page_qas()
+        manifest = read_json(self.project / "project.json")
+        comp_cache = self.project / "cache/composition.json"
+        comp_cache.parent.mkdir(exist_ok=True)
+        import json
+        comp_cache.write_text(
+            json.dumps({"schema_version": "1.0", "stages": {}})
+        )
+        manifest["artifacts"] = {
+            "character_bible": {
+                "path": "plan/character-bible.json",
+                "sha256": sha256_file(
+                    self.project / "plan/character-bible.json"
+                ),
+            },
+            "story_plan": {
+                "path": "plan/story-plan.json",
+                "sha256": sha256_file(
+                    self.project / "plan/story-plan.json"
+                ),
+            },
+            "storyboard": {
+                "path": "plan/storyboard.json",
+                "sha256": sha256_file(
+                    self.project / "plan/storyboard.json"
+                ),
+            },
+            "composition_cache": {
+                "path": "cache/composition.json",
+                "sha256": sha256_file(comp_cache),
+            },
+        }
+        atomic_write_json(self.project / "project.json", manifest)
+
     def test_require_valid_project_raises_on_invalid(self):
         with self.assertRaises(ProjectValidationError):
             require_valid_project(self.project, "final")
 
     def test_require_valid_project_returns_none_on_valid(self):
-        # valid at plan stage
         self.assertIsNone(
             require_valid_project(self.project, "plan")
         )
+
+    def test_guarded_export_rejects_invalid_panel_qa(self):
+        """RED: guarded_export must reject when panel QA has unresolved errors."""
+        self._make_export_ready()
+        # Corrupt panel QA with unresolved error
+        record = read_json(self.project / "qa/panels/p01-01.json")
+        record["checks"][0].update({"result": "fail", "severity": "error"})
+        record["decision"] = "regenerate"
+        record["retry_reason"] = "character identity failure"
+        atomic_write_json(self.project / "qa/panels/p01-01.json", record)
+        from export_pdf import guarded_export
+        with self.assertRaises(ProjectValidationError):
+            guarded_export(self.project)
+        # No PDF should be written
+        self.assertFalse(
+            (self.project / "exports/guard-test.pdf").is_file(),
+            "guarded_export must not write PDF when validation fails",
+        )
+
+    def test_guarded_export_rejects_missing_page_qa(self):
+        """RED: guarded_export must reject when page-QA is missing."""
+        self._add_panel_files()
+        (self.project / "pages").mkdir(exist_ok=True)
+        page_png = self.project / "pages/page-001.png"
+        Image.new("RGB", (1600, 2400), (0, 0, 0)).save(page_png)
+        lettered = self.project / "panels/lettered/p01-01.png"
+        lettered.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (736, 1136), (1, 1, 1)).save(lettered)
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"] = {
+            "character_bible": {
+                "path": "plan/character-bible.json",
+                "sha256": sha256_file(
+                    self.project / "plan/character-bible.json"
+                ),
+            },
+            "story_plan": {
+                "path": "plan/story-plan.json",
+                "sha256": sha256_file(
+                    self.project / "plan/story-plan.json"
+                ),
+            },
+            "storyboard": {
+                "path": "plan/storyboard.json",
+                "sha256": sha256_file(
+                    self.project / "plan/storyboard.json"
+                ),
+            },
+        }
+        atomic_write_json(self.project / "project.json", manifest)
+        (self.project / "cache").mkdir(exist_ok=True)
+        import json
+        (self.project / "cache/composition.json").write_text(
+            json.dumps({"schema_version": "1.0", "stages": {}})
+        )
+        from export_pdf import guarded_export
+        with self.assertRaises(ProjectValidationError):
+            guarded_export(self.project)
+        self.assertFalse(
+            (self.project / "exports/guard-test.pdf").is_file(),
+        )
+
+    def test_guarded_export_writes_pdf_and_records_descriptor(self):
+        """GREEN: guarded_export with valid export-ready writes PDF and records descriptor."""
+        self._make_export_ready()
+        from export_pdf import guarded_export
+        result = guarded_export(self.project)
+        self.assertTrue(result.is_file())
+        # Descriptor recorded in manifest
+        manifest = read_json(self.project / "project.json")
+        self.assertIn("pdf", manifest["artifacts"])
+        pdf_desc = manifest["artifacts"]["pdf"]
+        self.assertEqual(str(result.relative_to(self.project)), pdf_desc["path"])
+        self.assertEqual(64, len(pdf_desc["sha256"]))
+
+    def test_guarded_transition_rejects_incomplete_final(self):
+        """RED: transition to COMPLETE must reject when final artifacts missing."""
+        self._add_panel_files()
+        manifest = read_json(self.project / "project.json")
+        manifest["status"] = "EXPORTED"
+        atomic_write_json(self.project / "project.json", manifest)
+        from comic_sol import transition
+        with self.assertRaises(ProjectValidationError):
+            transition(self.project, "COMPLETE")
+        # Manifest unchanged
+        manifest = read_json(self.project / "project.json")
+        self.assertNotEqual("COMPLETE", manifest["status"])
+
+    def test_guarded_transition_allows_complete_with_all_artifacts(self):
+        """GREEN: transition to COMPLETE succeeds with all final artifacts."""
+        self._make_export_ready()
+        # Add report and PDF
+        (self.project / "qa/report.md").write_text("# QA Report\n", encoding="utf-8")
+        from export_pdf import guarded_export
+        pdf_path = guarded_export(self.project)
+        # Update manifest with report and pdf descriptors, set status to EXPORTED
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"]["qa_report"] = {
+            "path": "qa/report.md",
+            "sha256": sha256_file(self.project / "qa/report.md"),
+        }
+        manifest["artifacts"]["pdf"] = {
+            "path": str(pdf_path.relative_to(self.project)),
+            "sha256": sha256_file(pdf_path),
+        }
+        manifest["status"] = "EXPORTED"
+        atomic_write_json(self.project / "project.json", manifest)
+        from comic_sol import transition
+        result = transition(self.project, "COMPLETE")
+        self.assertEqual("COMPLETE", result["status"])
+
+    def test_guarded_transition_allows_complete_with_warnings(self):
+        """GREEN: transition to COMPLETE_WITH_WARNINGS succeeds with warnings."""
+        self._make_export_ready()
+        (self.project / "qa/report.md").write_text("# QA Report\n", encoding="utf-8")
+        from export_pdf import guarded_export
+        pdf_path = guarded_export(self.project)
+        manifest = read_json(self.project / "project.json")
+        manifest["artifacts"]["qa_report"] = {
+            "path": "qa/report.md",
+            "sha256": sha256_file(self.project / "qa/report.md"),
+        }
+        manifest["artifacts"]["pdf"] = {
+            "path": str(pdf_path.relative_to(self.project)),
+            "sha256": sha256_file(pdf_path),
+        }
+        manifest["warnings"] = ["minor prop drift"]
+        manifest["status"] = "EXPORTED"
+        atomic_write_json(self.project / "project.json", manifest)
+        from comic_sol import transition
+        result = transition(self.project, "COMPLETE_WITH_WARNINGS")
+        self.assertEqual("COMPLETE_WITH_WARNINGS", result["status"])
 
 
 if __name__ == "__main__":

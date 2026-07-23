@@ -141,7 +141,12 @@ class ManifestTests(unittest.TestCase):
             "EXPORTED",
         ):
             transition(export_project, state)
-        terminal = transition(export_project, "COMPLETE_WITH_WARNINGS", "minor prop drift")
+        # This test isolates transition-graph behavior; final artifact gating is
+        # covered by GuardedOperationTests.
+        with mock.patch("validate_project.require_valid_project"):
+            terminal = transition(
+                export_project, "COMPLETE_WITH_WARNINGS", "minor prop drift"
+            )
         self.assertEqual("COMPLETE_WITH_WARNINGS", terminal["status"])
         self.assertIn("minor prop drift", terminal["warnings"])
 

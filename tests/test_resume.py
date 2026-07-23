@@ -692,7 +692,10 @@ class ResumeTests(unittest.TestCase):
         for status in ("LETTERED", "COMPOSED", "EXPORTED"):
             transition(self.project, status)
 
-        completed = transition(self.project, "COMPLETE")
+        # This test isolates warning-target selection; final artifact gating is
+        # covered by GuardedOperationTests.
+        with patch("validate_project.require_valid_project"):
+            completed = transition(self.project, "COMPLETE")
         self.assertEqual("COMPLETE_WITH_WARNINGS", completed["status"])
 
     def test_resume_plan_without_cache_marks_every_stage_stale(self):
