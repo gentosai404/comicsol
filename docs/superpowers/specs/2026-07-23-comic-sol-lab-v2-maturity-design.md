@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 
-**Status:** Approved design, pending implementation plan
+**Status:** Approved design; Integrity Core implementation plan complete
 
 **Repository:** `wenn-id/comic-sol-lab` (private)
 
@@ -716,4 +716,4 @@ No release is called “perfect.” Release readiness means every objective gate
 
 ## 29. Approval
 
-The user approved architecture, reliability core, packaging/MCP/provider design, native distribution, testing, and comic-quality design in sequence on 2026-07-23. This written specification requires final user review before implementation planning begins.
+The user approved architecture, reliability core, packaging/MCP/provider design, native distribution, testing, and comic-quality design in sequence on 2026-07-23. The user gave final approval on 2026-07-23. Implementation planning may proceed milestone by milestone.
