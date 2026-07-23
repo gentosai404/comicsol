@@ -412,27 +412,143 @@ class ResumeTests(unittest.TestCase):
             with self.subTest(command=command), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(1, main(arguments))
 
-    def test_retry_budgets_and_transient_accounting(self):
-        for number in (2, 3):
-            attempt = self.project / f"panels/raw/p01-01.attempt-{number}.png"
-            Image.new("RGB", (512, 512), "green").save(attempt)
-            record_generation_attempt(self.project, "p01-01", "visual_retry", attempt)
-        extra = self.project / "panels/raw/p01-01.attempt-4.png"
-        Image.new("RGB", (512, 512), "red").save(extra)
-        with self.assertRaisesRegex(ValueError, "two visual retries"):
-            record_generation_attempt(self.project, "p01-01", "visual_retry", extra)
+    def _generation_state(self, project=None):
+        project = project or self.project
+        return tuple(
+            path.read_bytes() if path.exists() else None
+            for path in (
+                project / "logs/generation-counters.json",
+                project / "logs/events.jsonl",
+            )
+        )
 
-        project = init_project(self.root, "Budget", b"Story", {"mode": "short_prompt", "language": "en"})
-        for number in range(8):
-            attempt = project / f"panels/raw/p01-01.transient-{number + 1}.png"
-            Image.new("RGB", (512, 512), "blue").save(attempt)
-            counts = record_generation_attempt(project, "p01-01", "transient_repeat", attempt)
+    def _attempt(self, name, size=(512, 512), project=None):
+        project = project or self.project
+        path = project / f"panels/raw/{name}.png"
+        Image.new("RGB", size, "green").save(path)
+        return path
+
+    def _assert_attempt_rejected_without_mutation(
+        self, panel_id, kind, attempt, message, project=None
+    ):
+        project = project or self.project
+        before = self._generation_state(project)
+        with self.assertRaisesRegex(ValueError, message):
+            record_generation_attempt(project, panel_id, kind, attempt)
+        self.assertEqual(before, self._generation_state(project))
+
+    def test_second_initial_is_rejected_without_mutation(self):
+        first = self._attempt("p01-01.initial-1")
+        counts = record_generation_attempt(self.project, "p01-01", "initial", first)
+        self.assertEqual(1, counts["initial"])
+        self.assertEqual(0, counts["global_extra_calls"])
+        second = self._attempt("p01-01.initial-2")
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01", "initial", second, "one initial attempt"
+        )
+
+    def test_second_transient_repeat_is_rejected_without_mutation(self):
+        first = self._attempt("p01-01.transient-1")
+        counts = record_generation_attempt(
+            self.project, "p01-01", "transient_repeat", first
+        )
+        self.assertEqual(1, counts["transient_repeats"])
+        self.assertEqual(1, counts["global_extra_calls"])
+        second = self._attempt("p01-01.transient-2")
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01", "transient_repeat", second, "one transient repeat"
+        )
+
+    def test_third_visual_retry_is_rejected_without_mutation(self):
+        for number in (1, 2):
+            counts = record_generation_attempt(
+                self.project,
+                "p01-01",
+                "visual_retry",
+                self._attempt(f"p01-01.visual-{number}"),
+            )
+        self.assertEqual(2, counts["visual_retries"])
+        self.assertEqual(2, counts["global_extra_calls"])
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01",
+            "visual_retry",
+            self._attempt("p01-01.visual-3"),
+            "two visual retries",
+        )
+
+    def test_corrupt_raster_is_rejected_without_mutation(self):
+        attempt = self.project / "panels/raw/p01-01.corrupt.png"
+        attempt.write_bytes(b"not an image")
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01", "initial", attempt, "readable raster"
+        )
+
+    def test_small_raster_is_rejected_without_mutation(self):
+        for size in ((511, 512), (512, 511)):
+            with self.subTest(size=size):
+                self._assert_attempt_rejected_without_mutation(
+                    "p01-01",
+                    "initial",
+                    self._attempt(f"p01-01.small-{size[0]}x{size[1]}", size),
+                    "at least 512px",
+                )
+
+    def test_ninth_global_extra_is_rejected_and_initials_are_excluded(self):
+        project = init_project(
+            self.root,
+            "Budget",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        for number in range(1, 9):
+            panel_id = f"p{number:02d}-01"
+            counts = record_generation_attempt(
+                project,
+                panel_id,
+                "initial",
+                self._attempt(f"{panel_id}.initial", project=project),
+            )
+        self.assertEqual(0, counts["global_extra_calls"])
+        for number in (1, 2):
+            counts = record_generation_attempt(
+                project,
+                "p01-01",
+                "visual_retry",
+                self._attempt(f"p01-01.visual-{number}", project=project),
+            )
+        for number in range(2, 8):
+            panel_id = f"p{number:02d}-01"
+            counts = record_generation_attempt(
+                project,
+                panel_id,
+                "transient_repeat",
+                self._attempt(f"{panel_id}.transient", project=project),
+            )
         self.assertEqual(8, counts["global_extra_calls"])
-        self.assertEqual(0, counts["visual_retries"])
-        ninth = project / "panels/raw/p01-01.transient-9.png"
-        Image.new("RGB", (512, 512), "blue").save(ninth)
-        with self.assertRaisesRegex(ValueError, "eight extra calls"):
-            record_generation_attempt(project, "p01-01", "transient_repeat", ninth)
+        self.assertEqual(1, counts["transient_repeats"])
+        self._assert_attempt_rejected_without_mutation(
+            "p08-01",
+            "transient_repeat",
+            self._attempt("p08-01.transient", project=project),
+            "eight extra calls",
+            project,
+        )
+
+    def test_successful_attempt_appends_sanitized_event(self):
+        attempt = self._attempt("p01-01.initial")
+        record_generation_attempt(self.project, "p01-01", "initial", attempt)
+        event = json.loads(
+            (self.project / "logs/events.jsonl").read_text("utf-8").splitlines()[-1]
+        )
+        self.assertEqual("generation.attempt-recorded", event["event"])
+        self.assertEqual(
+            {
+                "attempt_path": "panels/raw/p01-01.initial.png",
+                "kind": "initial",
+                "panel_id": "p01-01",
+            },
+            event["details"],
+        )
 
     def _failing_panel_record(self, category):
         check_ids = (

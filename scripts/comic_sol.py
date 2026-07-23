@@ -18,7 +18,12 @@ from typing import Literal
 
 from PIL import Image, ImageFont
 
-from project_io import contained_project_path, durable_atomic_write, validate_source_bytes
+from project_io import (
+    ProjectLock,
+    contained_project_path,
+    durable_atomic_write,
+    validate_source_bytes,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1057,40 +1062,74 @@ def record_generation_attempt(
         raise ValueError("unknown generation attempt kind")
     project_dir = Path(project_dir)
     attempt = _contained_project_path(project_dir, Path(attempt_path))
-    if not attempt.is_file():
-        raise ValueError("attempt path must be a retained file")
-    counters = _read_generation_counters(project_dir)
-    panels = counters.get("panels")
-    if not isinstance(panels, dict):
-        raise ValueError("generation counter panels must be an object")
-    panel = panels.setdefault(panel_id, {
-        "initial": 0, "transient_repeats": 0, "visual_retries": 0,
-    })
-    if not isinstance(panel, dict):
-        raise ValueError("panel generation counters must be an object")
-    global_extras = counters.get("global_extra_calls", 0)
-    if not isinstance(global_extras, int):
-        raise ValueError("global generation counter must be an integer")
-    if kind == "visual_retry" and panel.get("visual_retries", 0) >= 2:
-        raise ValueError("at most two visual retries are allowed per panel")
-    if kind in {"visual_retry", "transient_repeat"} and global_extras >= 8:
-        raise ValueError("at most eight extra calls are allowed per project")
-    counter_name = {
+    attempt_relative = attempt.relative_to(project_dir.resolve(strict=True))
+    counter_names = {
         "initial": "initial",
-        "visual_retry": "visual_retries",
         "transient_repeat": "transient_repeats",
-    }[kind]
-    panel[counter_name] = int(panel.get(counter_name, 0)) + 1
-    if kind in {"visual_retry", "transient_repeat"}:
-        global_extras += 1
-        counters["global_extra_calls"] = global_extras
-    atomic_write_json(project_dir / GENERATION_COUNTERS_PATH, counters)
-    return {
-        "global_extra_calls": global_extras,
-        "initial": int(panel.get("initial", 0)),
-        "transient_repeats": int(panel.get("transient_repeats", 0)),
-        "visual_retries": int(panel.get("visual_retries", 0)),
+        "visual_retry": "visual_retries",
     }
+    limits = {"initial": 1, "transient_repeat": 1, "visual_retry": 2}
+    limit_messages = {
+        "initial": "at most one initial attempt is allowed per panel",
+        "transient_repeat": "at most one transient repeat is allowed per panel",
+        "visual_retry": "at most two visual retries are allowed per panel",
+    }
+    with ProjectLock(project_dir):
+        attempt = contained_project_path(
+            project_dir, attempt_relative, must_exist=True
+        )
+        if not attempt.is_file():
+            raise ValueError("attempt path must be a retained file")
+        _verify_raster(attempt)
+
+        counters = _read_generation_counters(project_dir)
+        panels = counters.get("panels")
+        if not isinstance(panels, dict):
+            raise ValueError("generation counter panels must be an object")
+        panel = panels.get(panel_id)
+        if panel is None:
+            panel = {"initial": 0, "transient_repeats": 0, "visual_retries": 0}
+            panels[panel_id] = panel
+        if not isinstance(panel, dict):
+            raise ValueError("panel generation counters must be an object")
+        for name in counter_names.values():
+            value = panel.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("panel generation counters must be non-negative integers")
+        global_extras = counters.get("global_extra_calls", 0)
+        if (
+            isinstance(global_extras, bool)
+            or not isinstance(global_extras, int)
+            or global_extras < 0
+        ):
+            raise ValueError("global generation counter must be a non-negative integer")
+
+        counter_name = counter_names[kind]
+        if panel[counter_name] >= limits[kind]:
+            raise ValueError(limit_messages[kind])
+        if kind != "initial" and global_extras >= 8:
+            raise ValueError("at most eight extra calls are allowed per project")
+
+        panel[counter_name] += 1
+        if kind != "initial":
+            global_extras += 1
+            counters["global_extra_calls"] = global_extras
+        atomic_write_json(project_dir / GENERATION_COUNTERS_PATH, counters)
+        append_event(
+            project_dir,
+            "generation.attempt-recorded",
+            {
+                "attempt_path": attempt_relative,
+                "kind": kind,
+                "panel_id": panel_id,
+            },
+        )
+        return {
+            "global_extra_calls": global_extras,
+            "initial": panel["initial"],
+            "transient_repeats": panel["transient_repeats"],
+            "visual_retries": panel["visual_retries"],
+        }
 
 
 def _verify_raster(path: Path) -> tuple[int, int]:
