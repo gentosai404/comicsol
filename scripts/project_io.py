@@ -325,10 +325,12 @@ class ProjectTransaction:
                 child.unlink()
             except OSError:
                 pass
+        parent = self._dir.parent
         try:
             self._dir.rmdir()
         except OSError:
             pass
+        fsync_directory(parent)
         self._dir = None
 
     def __exit__(self, exc_type, exc, traceback) -> None:
@@ -348,47 +350,47 @@ class ProjectTransaction:
 
     @staticmethod
     def recover(project_dir: Path) -> None:
-        """Inspect all transaction directories and roll back any incomplete
-        transaction, restoring backups in reverse order."""
-        base = Path(project_dir) / "logs/transactions"
+        """Roll back incomplete journals while holding the project lock."""
+        project_dir = Path(project_dir)
+        base = project_dir / "logs/transactions"
         if not base.is_dir():
             return
-        ids: list[int] = []
-        for entry in base.iterdir():
-            try:
-                ids.append(int(entry.name))
-            except (ValueError, OSError):
-                continue
-        for tid in sorted(ids):
-            tx_dir = base / str(tid)
-            journal_path = tx_dir / "journal.json"
-            if not journal_path.is_file():
-                continue
-            try:
-                journal = json.loads(journal_path.read_text("utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            phase = journal.get("phase")
-            targets = journal.get("targets")
-            if not isinstance(targets, list):
-                continue
-            if phase == "committed":
-                pass
-            elif phase in ("staging", "publishing", "rolled_back"):
-                for entry in reversed(targets):
-                    dest = Path(project_dir) / entry["path"]
-                    backup_path = entry.get("backup")
-                    if backup_path:
-                        backup = Path(project_dir) / backup_path
-                        if backup.is_file():
-                            os.replace(backup, dest)
-                            fsync_directory(dest.parent)
-            for child in tx_dir.iterdir():
+        with ProjectLock(project_dir):
+            ids: list[int] = []
+            for entry in base.iterdir():
                 try:
-                    child.unlink()
+                    ids.append(int(entry.name))
+                except (ValueError, OSError):
+                    continue
+            for tid in sorted(ids):
+                tx_dir = base / str(tid)
+                journal_path = tx_dir / "journal.json"
+                if not journal_path.is_file():
+                    continue
+                try:
+                    journal = json.loads(journal_path.read_text("utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                phase = journal.get("phase")
+                targets = journal.get("targets")
+                if not isinstance(targets, list):
+                    continue
+                if phase in ("staging", "publishing", "rolled_back"):
+                    for entry in reversed(targets):
+                        dest = project_dir / entry["path"]
+                        backup_path = entry.get("backup")
+                        if backup_path:
+                            backup = project_dir / backup_path
+                            if backup.is_file():
+                                os.replace(backup, dest)
+                                fsync_directory(dest.parent)
+                for child in tx_dir.iterdir():
+                    try:
+                        child.unlink()
+                    except OSError:
+                        pass
+                try:
+                    tx_dir.rmdir()
                 except OSError:
                     pass
-            try:
-                tx_dir.rmdir()
-            except OSError:
-                pass
+                fsync_directory(base)
