@@ -150,3 +150,51 @@ Exit code: `0`.
 ## Concerns
 
 None.
+
+## Containment review gap closure
+
+### Inherited RED evidence
+
+Command:
+
+```bash
+/home/acer/.venvs/comic-sol-mcp/bin/python -m unittest tests.test_project_io tests.test_composition tests.test_resume tests.test_validation tests.test_mcp_server -v
+```
+
+Result: expected RED, exit `1`; 100 tests ran with 9 failures and 1 native-Windows skip. Failures covered drive-relative rejection, composition pre-open re-check, two promotion re-check points, three validation hash re-checks, and two MCP parity cases.
+
+### GREEN focused suite
+
+Same command. Exact result: 100 tests passed in 10.668s; 0 failures, 0 errors, 1 native-Windows junction/reparse skip.
+
+### Full suite
+
+Command:
+
+```bash
+/home/acer/.venvs/comic-sol-mcp/bin/python -m unittest discover -s tests -v
+```
+
+Exact result: 162 tests passed in 28.950s; 0 failures, 0 errors, 1 native-Windows junction/reparse skip.
+
+### Whitespace gates
+
+Both `git diff --check 1f0592f..HEAD` and working-tree `git diff --check` produced no output and exited `0` before commit.
+
+### Implementation commit
+
+`98fa6d8` — `fix: close Task 1 containment review gaps`
+
+### Self-review
+
+- Shared resolver rejects every `^[A-Za-z]:` form and normalized UNC paths.
+- Composition retains project-relative source values and resolves with `must_exist=True` immediately before `Image.open`.
+- Promotion retains caller-relative paths where supplied and resolves immediately before `_verify_raster` and `read_bytes`.
+- Validation resolves original relative raw, source, and artifact paths with `must_exist=True` immediately before each tested `sha256_file` call.
+- CLI and MCP attempt tools share resolver rejection semantics.
+- Duplicate lettering resolver call removed.
+- No race-free open mechanism added beyond required immediate re-checks.
+
+### Remaining concern
+
+- Native Windows junction/reparse fixture skipped under WSL by design; native-Windows run still required for that OS-specific case.
