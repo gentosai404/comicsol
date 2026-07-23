@@ -354,6 +354,9 @@ class PromotionArchiveRaceTests(unittest.TestCase):
             '{"schema_version":"1.0","status":"PANELS_READY"}', "utf-8"
         )
         self._barrier = self.project_dir / "promotion-barrier"
+        self.old_accepted_bytes = (
+            self.project_dir / "panels/raw/p01-01.png"
+        ).read_bytes()
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -384,9 +387,16 @@ class PromotionArchiveRaceTests(unittest.TestCase):
         self.assertTrue(raw_p01.is_file())
         archives = list((self.project_dir / "panels/raw").glob("p01-01.attempt-*.png"))
         self.assertEqual(1, len(archives))
+        self.assertEqual(self.old_accepted_bytes, archives[0].read_bytes())
         self.assertNotEqual(raw_p01.read_bytes(), archives[0].read_bytes())
-        self.assertTrue(archives[0].is_file())
-        self.assertGreater(os.path.getsize(archives[0]), 0)
+        events = [
+            json.loads(line)
+            for line in (self.project_dir / "logs/events.jsonl").read_text("utf-8").splitlines()
+        ]
+        promoted = [event for event in events if event["event"] == "generation.attempt-promoted"]
+        self.assertEqual(1, len(promoted))
+        self.assertEqual("p01-01", promoted[0]["details"]["panel_id"])
+        self.assertEqual("panels/raw/p01-01.new.png", promoted[0]["details"]["attempt_path"])
 
 
 if __name__ == "__main__":
