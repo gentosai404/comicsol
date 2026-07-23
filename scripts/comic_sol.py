@@ -1156,20 +1156,31 @@ def promote_attempt(project_dir: Path, panel_id: str, attempt_path: Path) -> Pat
         raise ValueError("attempt path must be a retained file")
     if attempt_relative.is_absolute():
         attempt_relative = attempt.relative_to(project_dir.resolve(strict=True))
-    attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
-    _verify_raster(attempt)
-    destination = project_dir / f"panels/raw/{panel_id}.png"
-    if destination.is_file() and sha256_file(destination) != sha256_file(attempt):
-        number = 1
-        while True:
-            archive = destination.with_name(f"{panel_id}.attempt-{number}.png")
-            if not archive.exists() and archive.resolve() != attempt.resolve():
-                atomic_write_bytes(archive, destination.read_bytes())
-                break
-            number += 1
-    attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
-    atomic_write_bytes(destination, attempt.read_bytes())
-    return destination
+    with ProjectLock(project_dir):
+        attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
+        if not attempt.is_file():
+            raise ValueError("attempt path must be a retained file")
+        _verify_raster(attempt)
+        destination = project_dir / f"panels/raw/{panel_id}.png"
+        event_details = {"attempt_path": attempt_relative, "panel_id": panel_id}
+        if destination.is_file():
+            old_bytes = destination.read_bytes()
+            old_sha = sha256_file(destination)
+            new_sha = sha256_file(attempt)
+            if old_sha == new_sha:
+                return destination
+            number = 1
+            while True:
+                archive = destination.with_name(f"{panel_id}.attempt-{number}.png")
+                candidate = archive.resolve()
+                if not archive.exists() and candidate != attempt.resolve() and candidate != destination.resolve():
+                    durable_atomic_write(archive, old_bytes)
+                    break
+                number += 1
+        attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
+        durable_atomic_write(destination, attempt.read_bytes())
+        append_event(project_dir, "generation.attempt-promoted", event_details)
+        return destination
 
 
 def record_override(project_dir: Path, panel_id: str, reason: str) -> None:

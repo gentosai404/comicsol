@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -7,6 +8,10 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import project_io
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from comic_sol import record_generation_attempt  # noqa: E402
 
 
 CHILD_LOCK_SCRIPT = r"""
@@ -189,6 +194,199 @@ class ProjectLockTests(unittest.TestCase):
             metadata = (self.project / ".comic-sol.lock").read_text(encoding="ascii")
         self.assertEqual(f"{os.getpid()}\n", metadata)
         self.assertTrue((self.project / ".comic-sol.lock").is_file())
+
+
+_BUDGET_RACE_CHILD = r"""
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.fspath(Path(sys.argv[2]) / "scripts"))
+from comic_sol import record_generation_attempt
+project_dir = Path(sys.argv[1])
+record_generation_attempt(project_dir, sys.argv[3], sys.argv[4], project_dir / sys.argv[5])
+""".strip()
+
+
+class RetryCounterProcessTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.project_dir = self.root / "project"
+        self.project_dir.mkdir()
+        for path in ("panels/raw", "logs"):
+            (self.project_dir / path).mkdir(parents=True, exist_ok=True)
+        self._seed_project()
+        self._barrier = self.project_dir / "budget-barrier"
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def _seed_project(self):
+        for panel_id, color in [
+            ("p01-01", "navy"), ("p01-02", "blue"), ("p01-03", "green"),
+            ("p01-04", "red"), ("p01-05", "yellow"), ("p01-06", "magenta"),
+            ("p01-07", "cyan"), ("p01-08", "white"),
+        ]:
+            attempt = self.project_dir / f"panels/raw/{panel_id}.initial.png"
+            from PIL import Image as PILImage
+            PILImage.new("RGB", (512, 512), color).save(attempt)
+            record_generation_attempt(self.project_dir, panel_id, "initial", attempt)
+
+    @staticmethod
+    def _child_script_code():
+        return (
+            "import json, os, sys, time; sys.path.insert(0, os.fspath("
+            "Path(sys.argv[2]) / 'scripts')); from comic_sol import record_generation_attempt;"
+            "p=Path(sys.argv[1]); pid=os.fspath(p / sys.argv[3])"
+        )
+
+    def _launch_budget_children(self):
+        scripts_root = os.fspath(Path(__file__).resolve().parents[1])
+        children = []
+        pairs = [
+            # 8 distinct successes
+            ("p01-01", "visual_retry", "p01-01.visual-1.png"),
+            ("p01-02", "visual_retry", "p01-02.visual-1.png"),
+            ("p01-03", "visual_retry", "p01-03.visual-1.png"),
+            ("p01-04", "visual_retry", "p01-04.visual-1.png"),
+            ("p01-05", "visual_retry", "p01-05.visual-1.png"),
+            ("p01-06", "visual_retry", "p01-06.visual-1.png"),
+            ("p01-07", "visual_retry", "p01-07.visual-1.png"),
+            ("p01-08", "visual_retry", "p01-08.visual-1.png"),
+            # 4 transient repeats — will conflict
+            ("p01-01", "transient_repeat", "p01-01.transient-1.png"),
+            ("p01-02", "transient_repeat", "p01-02.transient-1.png"),
+            ("p01-03", "transient_repeat", "p01-03.transient-1.png"),
+            ("p01-04", "transient_repeat", "p01-04.transient-1.png"),
+            # 4 third visual retries — will fail
+            ("p01-01", "visual_retry", "p01-01.visual-3.png"),
+            ("p01-02", "visual_retry", "p01-02.visual-3.png"),
+            ("p01-03", "visual_retry", "p01-03.visual-3.png"),
+            ("p01-04", "visual_retry", "p01-04.visual-3.png"),
+            # 4 ninth global calls — will fail
+            ("p01-05", "visual_retry", "p01-05.visual-9.png"),
+            ("p01-06", "visual_retry", "p01-06.visual-9.png"),
+            ("p01-07", "visual_retry", "p01-07.visual-9.png"),
+            ("p01-08", "visual_retry", "p01-08.visual-9.png"),
+        ]
+        for panel_id, kind, attempt_name in pairs:
+            attempt_path = self.project_dir / f"panels/raw/{attempt_name}"
+            from PIL import Image as _PILImage
+            _PILImage.new("RGB", (512, 512), (0, 0, 0)).save(attempt_path)
+            child_script = (
+                f"import json, os, sys, time\n"
+                f"from pathlib import Path\n"
+                f"_sr={scripts_root!r}\n"
+                f"sys.path.insert(0, os.path.join(_sr, 'scripts'))\n"
+                f"from comic_sol import record_generation_attempt\n"
+                f"project = Path(sys.argv[1])\n"
+                f"barrier = project / 'budget-barrier'\n"
+                f"for _ in range(500):\n"
+                f"    if barrier.exists():\n"
+                f"        break\n"
+                f"    time.sleep(0.01)\n"
+                f"else:\n"
+                f"    raise SystemExit('barrier timeout')\n"
+                f"try:\n"
+                f"    record_generation_attempt(project, {panel_id!r}, {kind!r}, project / 'panels/raw/{attempt_name}')\n"
+                f"    print('SUCCESS:' + {panel_id!r}, flush=True)\n"
+                f"except ValueError as e:\n"
+                f"    print('FAILURE:' + str(e), flush=True)\n"
+            )
+            proc = subprocess.Popen(
+                [sys.executable, "-c", child_script, os.fspath(self.project_dir), scripts_root],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            children.append(proc)
+        self._barrier.write_text("go", encoding="ascii")
+        return children
+
+    def test_20_process_budget_race(self):
+        children = self._launch_budget_children()
+        successes = 0
+        failures = 0
+        for proc in children:
+            out, err = proc.communicate(timeout=60)
+            if "SUCCESS:" in out:
+                successes += 1
+            else:
+                self.assertIn("FAILURE:", out or err)
+                failures += 1
+        self.assertEqual(8, successes)
+        self.assertEqual(12, failures)
+        counters_path = self.project_dir / "logs/generation-counters.json"
+        counters = json.loads(counters_path.read_text("utf-8"))
+        self.assertEqual(8, counters["global_extra_calls"])
+
+
+_PROMOTION_RACE_CHILD = r"""
+import os, sys, time
+from pathlib import Path
+sys.path.insert(0, os.fspath(Path(sys.argv[2]) / "scripts"))
+from comic_sol import promote_attempt
+project = Path(sys.argv[1])
+barrier = project / "promotion-barrier"
+for _ in range(500):
+    if barrier.exists():
+        break
+    time.sleep(0.01)
+else:
+    raise SystemExit("barrier timeout")
+try:
+    promote_attempt(project, "p01-01", project / "panels/raw/p01-01.new.png")
+    print("SUCCESS", flush=True)
+except Exception as e:
+    print("CONFLICT:" + str(e), flush=True)
+""".strip()
+
+
+class PromotionArchiveRaceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.project_dir = self.root / "project"
+        self.project_dir.mkdir()
+        (self.project_dir / "panels/raw").mkdir(parents=True)
+        (self.project_dir / "logs").mkdir(parents=True)
+        from PIL import Image as PILImage
+        PILImage.new("RGB", (512, 512), "navy").save(self.project_dir / "panels/raw/p01-01.png")
+        PILImage.new("RGB", (512, 512), "blue").save(self.project_dir / "panels/raw/p01-01.new.png")
+        (self.project_dir / "project.json").write_text(
+            '{"schema_version":"1.0","status":"PANELS_READY"}', "utf-8"
+        )
+        self._barrier = self.project_dir / "promotion-barrier"
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def test_promotion_archive_race(self):
+        scripts_root = os.fspath(Path(__file__).resolve().parents[1])
+        children = []
+        for _ in range(2):
+            proc = subprocess.Popen(
+                [sys.executable, "-c", _PROMOTION_RACE_CHILD, os.fspath(self.project_dir), scripts_root],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            children.append(proc)
+        self._barrier.write_text("go", encoding="ascii")
+        successes = 0
+        conflicts = 0
+        for proc in children:
+            out, err = proc.communicate(timeout=60)
+            self.assertIn("SUCCESS" if "SUCCESS" in out else "CONFLICT:", out or err)
+            if "SUCCESS" in out:
+                successes += 1
+            else:
+                conflicts += 1
+        self.assertEqual(2, successes)
+        self.assertEqual(0, conflicts)
+
+        raw_p01 = self.project_dir / "panels/raw/p01-01.png"
+        self.assertTrue(raw_p01.is_file())
+        archives = list((self.project_dir / "panels/raw").glob("p01-01.attempt-*.png"))
+        self.assertEqual(1, len(archives))
+        self.assertNotEqual(raw_p01.read_bytes(), archives[0].read_bytes())
+        self.assertTrue(archives[0].is_file())
+        self.assertGreater(os.path.getsize(archives[0]), 0)
 
 
 if __name__ == "__main__":
