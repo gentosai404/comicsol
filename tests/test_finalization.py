@@ -95,7 +95,7 @@ class FinalArtifactTests(unittest.TestCase):
                 "status": "reviewed",
             },
         )
-        lettered = self.project / "panels/lettered/p01-01.png"
+        lettered = self.project / "panels/p01-01/lettered.png"
         lettered.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (736, 1136), (10, 20, 30)).save(lettered)
 
@@ -164,7 +164,7 @@ class FinalArtifactTests(unittest.TestCase):
         (self.project / "pages").mkdir(exist_ok=True)
         page_png = self.project / "pages/page-001.png"
         Image.new("RGB", (1600, 2400), (0, 0, 0)).save(page_png)
-        lettered = self.project / "panels/lettered/p01-01.png"
+        lettered = self.project / "panels/p01-01/lettered.png"
         lettered.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (736, 1136), (1, 1, 1)).save(lettered)
         manifest = read_json(self.project / "project.json")
@@ -265,7 +265,7 @@ class GuardedOperationTests(unittest.TestCase):
                 "status": "reviewed",
             },
         )
-        lettered = self.project / "panels/lettered/p01-01.png"
+        lettered = self.project / "panels/p01-01/lettered.png"
         lettered.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (736, 1136), (10, 20, 30)).save(lettered)
 
@@ -338,7 +338,7 @@ class GuardedOperationTests(unittest.TestCase):
         (self.project / "pages").mkdir(exist_ok=True)
         page_png = self.project / "pages/page-001.png"
         Image.new("RGB", (1600, 2400), (0, 0, 0)).save(page_png)
-        lettered = self.project / "panels/lettered/p01-01.png"
+        lettered = self.project / "panels/p01-01/lettered.png"
         lettered.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (736, 1136), (1, 1, 1)).save(lettered)
         manifest = read_json(self.project / "project.json")

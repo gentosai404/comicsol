@@ -1147,9 +1147,9 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
 
         # Lettered panels.
         for panel_id in panels:
-            lettered = project_dir / f"panels/lettered/{panel_id}.png"
+            lettered = project_dir / f"panels/{panel_id}/lettered.png"
             if not lettered.is_file():
-                _add(issues, f"panels/lettered/{panel_id}.png", "",
+                _add(issues, f"panels/{panel_id}/lettered.png", "",
                      "lettered panel is missing")
 
         # export-ready does not require report, PDF, or export cache.

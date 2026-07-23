@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import shutil
 import sys
 import tempfile
@@ -22,6 +24,7 @@ TOOL_NAMES = {
     "comic_transition",
     "comic_validate",
     "comic_resume_plan",
+    "comic_resume",
     "comic_invalidate",
     "comic_record_stage",
     "comic_record_attempt",
@@ -29,7 +32,9 @@ TOOL_NAMES = {
     "comic_override_panel",
     "comic_letter",
     "comic_compose",
+    "comic_render_report",
     "comic_export",
+    "comic_finalize",
 }
 
 
@@ -200,6 +205,82 @@ class McpProtocolTests(unittest.IsolatedAsyncioTestCase):
                         "project_id": "sunlight-courier", "stage": "export",
                     })
                     self.assertIn("qa_report", invalidated["result"])
+
+    async def test_finalize_lifecycle_produces_terminal_artifacts(self):
+        """Full deterministic finalize: lettering → composition → page-QA → export → report → transition."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_root = Path(temporary_directory) / "output"
+            output_root.mkdir()
+            sample = ROOT / "samples/sunlight-courier"
+            project = output_root / "sunlight-courier"
+            shutil.copytree(sample, project)
+
+            # Downgrade to pre-lettering state and remove terminal artifacts.
+            manifest_path = project / "project.json"
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            manifest["status"] = "QA_READY"
+            manifest["warnings"] = []
+            for key in ("pdf", "qa_report", "composition_cache"):
+                manifest["artifacts"].pop(key, None)
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", "utf-8")
+            for rel in ("exports/sunlight-courier.pdf", "qa/report.md", "cache/composition.json"):
+                p = project / rel
+                if p.is_file():
+                    p.unlink()
+
+            # Install page-QA records with correct hashes.
+            qa_pages = project / "qa/pages"
+            qa_pages.mkdir(parents=True, exist_ok=True)
+            for page_number in (1, 2):
+                page_path = project / f"pages/page-{page_number:03d}.png"
+                page_hash = hashlib.sha256(page_path.read_bytes()).hexdigest()
+                record = {
+                    "page": page_number,
+                    "page_path": f"pages/page-{page_number:03d}.png",
+                    "page_sha256": page_hash,
+                    "schema_version": "1.0",
+                    "status": "reviewed",
+                }
+                (qa_pages / f"page-{page_number:03d}.json").write_text(
+                    json.dumps(record, indent=2, sort_keys=True) + "\n", "utf-8"
+                )
+
+            parameters = StdioServerParameters(
+                command=sys.executable,
+                args=[str(ROOT / "scripts/mcp_server.py"), "--root", str(output_root)],
+            )
+            async with stdio_client(parameters) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+
+                    result = await session.call_tool("comic_finalize", {"project_id": "sunlight-courier"})
+                    self.assertFalse(result.isError, "comic_finalize")
+                    content: Any = result.structuredContent
+                    self.assertEqual("COMPLETE", content["status"])
+                    self.assertEqual("exports/sunlight-courier.pdf", content["pdf"])
+                    self.assertEqual("qa/report.md", content["report"])
+
+                    # PDF exists and is readable.
+                    pdf_path = project / "exports/sunlight-courier.pdf"
+                    self.assertTrue(pdf_path.is_file())
+                    self.assertGreater(pdf_path.stat().st_size, 0)
+
+                    # Report exists.
+                    self.assertTrue((project / "qa/report.md").is_file())
+
+                    # Export cache exists.
+                    self.assertTrue((project / "cache/composition.json").is_file())
+
+                    # Final validator returns no issues.
+                    validated = await session.call_tool("comic_validate", {
+                        "project_id": "sunlight-courier", "stage": "final",
+                    })
+                    self.assertFalse(validated.isError)
+                    self.assertEqual([], validated.structuredContent["result"])
+
+                    # Terminal status matches warning state (no warnings → COMPLETE).
+                    status = await session.call_tool("comic_status", {"project_id": "sunlight-courier"})
+                    self.assertEqual("COMPLETE", status.structuredContent["status"])
 
 
 if __name__ == "__main__":

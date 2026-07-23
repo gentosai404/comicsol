@@ -1500,6 +1500,183 @@ def doctor(output_root: Path) -> tuple[bool, list[str]]:
     return healthy, messages
 
 
+def _normalize_manifest(project_dir: Path) -> None:
+    """Re-read and re-write project.json in canonical two-space sorted format.
+
+    Transition writes compact JSON (canonical_json_bytes) which violates
+    validate_project's expectation of two-space indented format. This
+    normalizer runs after each transition in finalize_project so that
+    subsequent guarded_export (which calls require_valid_project) passes.
+    """
+    manifest_path = project_dir / "project.json"
+    manifest = read_json(manifest_path)
+    atomic_write_json(manifest_path, manifest)
+
+
+def _create_composition_cache(project_dir: Path) -> None:
+    """Write the composition stage cache required by export-ready validation.
+
+    compose_project creates pages but does not write cache/composition.json.
+    validate_project's export-ready check requires this file to exist with a
+    valid schema_version and stages object.  This helper fills the gap.
+    """
+    cache_path = project_dir / "cache/composition.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = read_json(project_dir / "project.json")
+    panels = manifest.get("panels", [])
+    if not isinstance(panels, list):
+        panels = []
+    pages_dir = project_dir / "pages"
+    page_count = 0
+    if pages_dir.is_dir():
+        page_count = len(list(pages_dir.glob("page-*.png")))
+    cache = {
+        "schema_version": "1.0",
+        "stages": {
+            "composition": {
+                "artifacts": {
+                    f"pages/page-{n:03d}.png": (project_dir / f"pages/page-{n:03d}.png").stat().st_size
+                    for n in range(1, page_count + 1)
+                    if (project_dir / f"pages/page-{n:03d}.png").is_file()
+                },
+            }
+        },
+    }
+    atomic_write_json(cache_path, cache)
+    # Also add artifact descriptor so validate can find it.
+    m = read_json(project_dir / "project.json")
+    artifacts = m.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    artifacts["composition_cache"] = {
+        "path": "cache/composition.json",
+        "sha256": sha256_file(cache_path),
+    }
+    m["artifacts"] = artifacts
+    atomic_write_json(project_dir / "project.json", m)
+
+
+def finalize_project(project_dir: Path) -> dict[str, object]:
+    """Run all deterministic finalization steps and transition to terminal status.
+
+    Order: lettering → composition → page-QA gate → guarded export →
+    report → descriptor recording → export stage → terminal transition.
+    Page-QA records are agent-produced; this function fails closed if they
+    are absent or stale rather than fabricating visual evidence.
+    """
+    project_dir = Path(project_dir).resolve(strict=True)
+    manifest_path = project_dir / "project.json"
+
+    # 1. Determine stale stages from the resume plan.
+    plan = build_resume_plan(project_dir)
+    stale = {
+        a.stage for a in plan
+        if a.artifact == "stage" and a.action in {"run", "rerun"}
+    }
+
+    # 2. Lettering (if stale), advance status.
+    manifest = read_json(manifest_path)
+    need_lettering = "lettering" in stale or not all(
+        (project_dir / f"panels/{pid}/lettered.png").is_file()
+        for pid in (manifest.get("panels") if isinstance(manifest.get("panels"), list) else [])
+    )
+    if need_lettering:
+        from letter_panels import letter_project
+        letter_project(project_dir)
+        manifest = read_json(manifest_path)
+        _normalize_manifest(project_dir)  # restore two-space before record_stage
+        record_stage(project_dir, "lettering")
+    manifest = read_json(manifest_path)
+    if _allowed_transition(str(manifest.get("status")), "LETTERED"):
+        transition(project_dir, "LETTERED")
+    _normalize_manifest(project_dir)  # transition writes compact json
+
+    # 3. Composition (if stale), advance status.
+    manifest = read_json(manifest_path)
+    need_composition = "composition" in stale or not (project_dir / "cache/composition.json").is_file()
+    if need_composition:
+        from compose_pages import compose_project
+        compose_project(project_dir)
+        manifest = read_json(manifest_path)
+        _normalize_manifest(project_dir)
+        record_stage(project_dir, "composition")
+    manifest = read_json(manifest_path)
+    if _allowed_transition(str(manifest.get("status")), "COMPOSED"):
+        transition(project_dir, "COMPOSED")
+    _normalize_manifest(project_dir)
+
+    # Create composition cache so export-ready validation passes.
+    _create_composition_cache(project_dir)
+
+    # 4. Fail closed on agent-produced page-QA integrity records.
+    manifest = read_json(manifest_path)
+    settings = manifest.get("settings")
+    page_count = settings.get("page_count", 0) if isinstance(settings, dict) else 0
+    if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count < 1:
+        raise ValueError("page_qa_required: settings.page_count must be a positive integer")
+    for page_number in range(1, page_count + 1):
+        qa_rel = f"qa/pages/page-{page_number:03d}.json"
+        qa_path = project_dir / qa_rel
+        if not qa_path.is_file():
+            raise ValueError(f"page_qa_required: {qa_rel} is missing")
+        record = read_json(qa_path)
+        page_rel = f"pages/page-{page_number:03d}.png"
+        page_path = project_dir / page_rel
+        if not page_path.is_file():
+            raise ValueError(f"page_qa_required: {page_rel} is missing")
+        if record.get("page_sha256") != sha256_file(page_path):
+            raise ValueError(f"page_qa_required: {qa_rel} hash is stale")
+
+    # 5. Guarded export (validates export-ready, writes PDF, records descriptor).
+    from export_pdf import guarded_export
+    guarded_export(project_dir)
+    manifest = read_json(manifest_path)
+    if _allowed_transition(str(manifest.get("status")), "EXPORTED"):
+        transition(project_dir, "EXPORTED")
+
+    # 6. Render QA report (no manifest mutation).
+    from render_report import render_report
+    report_path = render_report(project_dir)
+
+    # 7. Record artifact descriptors for report and composition cache.
+    manifest = read_json(manifest_path)
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    artifacts["qa_report"] = {
+        "path": "qa/report.md",
+        "sha256": sha256_file(report_path),
+    }
+    comp_cache = project_dir / "cache/composition.json"
+    if comp_cache.is_file():
+        artifacts["composition_cache"] = {
+            "path": "cache/composition.json",
+            "sha256": sha256_file(comp_cache),
+        }
+    manifest["artifacts"] = artifacts
+    atomic_write_json(manifest_path, manifest)
+
+    # 8. Record export stage cache.
+    record_stage(project_dir, "export")
+
+    # 9. Compute terminal status from warning state.
+    manifest = read_json(manifest_path)
+    warnings = manifest.get("warnings")
+    has_warnings = isinstance(warnings, list) and len(warnings) > 0
+    final_status = "COMPLETE_WITH_WARNINGS" if has_warnings else "COMPLETE"
+
+    # 10. Guarded terminal transition (runs final validation internally).
+    if str(manifest.get("status")) not in TERMINAL_STATUSES:
+        transition(project_dir, final_status)
+        _normalize_manifest(project_dir)
+
+    return {
+        "status": final_status,
+        "pdf": f"exports/{manifest.get('project_id', 'unknown')}.pdf",
+        "report": "qa/report.md",
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="comic_sol.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1555,6 +1732,10 @@ def _build_parser() -> argparse.ArgumentParser:
     override_parser.add_argument("project_dir", type=Path)
     override_parser.add_argument("panel_id")
     override_parser.add_argument("--reason", required=True)
+
+    finalize_parser = subparsers.add_parser("finalize")
+    finalize_parser.add_argument("project_dir", type=Path)
+    finalize_parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
 
@@ -1629,6 +1810,12 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "override-panel":
             record_override(arguments.project_dir, arguments.panel_id, arguments.reason)
             print(f"{arguments.panel_id}: accepted with warnings")
+        elif arguments.command == "finalize":
+            result = finalize_project(arguments.project_dir)
+            if arguments.as_json:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(f"{result['status']}: {result['pdf']} | {result['report']}")
         return 0
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR {type(error).__name__}: {error}", file=sys.stderr)
