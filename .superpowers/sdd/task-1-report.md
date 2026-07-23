@@ -198,3 +198,11 @@ Both `git diff --check 1f0592f..HEAD` and working-tree `git diff --check` produc
 ### Remaining concern
 
 - Native Windows junction/reparse fixture skipped under WSL by design; native-Windows run still required for that OS-specific case.
+
+## Approved-review Minor cleanup
+
+- Removed redundant `_contained_project_path()` call before strict `contained_project_path(..., must_exist=True)` promotion re-check.
+- Fresh focused promotion tests: 2 passed in 0.078s; 0 failures, 0 errors.
+- `git diff --check 1f0592f..HEAD`: no output; exit `0`.
+- Implementation commit: `8ff756f` — `refactor: remove redundant promotion path check`.
+- New concerns: none.
