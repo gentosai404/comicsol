@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import importlib.util
 import json
 import shutil
 import sys
@@ -11,10 +12,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import mcp_server  # noqa: E402
-from mcp import ClientSession, StdioServerParameters  # noqa: E402
-from mcp.client.stdio import stdio_client  # noqa: E402
-from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
+MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
+
+if MCP_AVAILABLE:
+    import mcp_server  # noqa: E402
+    from mcp import ClientSession, StdioServerParameters  # noqa: E402
+    from mcp.client.stdio import stdio_client  # noqa: E402
+    from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 
 TOOL_NAMES = {
@@ -38,6 +42,7 @@ TOOL_NAMES = {
 }
 
 
+@unittest.skipUnless(MCP_AVAILABLE, "MCP extra is not installed")
 class McpServerUnitTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -103,6 +108,7 @@ class McpServerUnitTests(unittest.TestCase):
                     tool(*arguments)
 
 
+@unittest.skipUnless(MCP_AVAILABLE, "MCP extra is not installed")
 class McpProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def test_stdio_protocol_exercises_all_tools(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

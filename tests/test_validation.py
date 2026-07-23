@@ -839,3 +839,18 @@ class PackagingTests(unittest.TestCase):
             "fallback boxes",
         ):
             self.assertIn(phrase, readme)
+
+    def test_readme_and_ci_are_portable_and_describe_optional_mcp(self):
+        readme = self.readme()
+        workflow = (ROOT / ".github/workflows/tests.yml").read_text("utf-8")
+        recovery = (ROOT / "references/capability-detection.md").read_text("utf-8")
+        self.assertNotIn("/home/acer", readme)
+        self.assertNotIn("/mnt/c/Users/acer", readme)
+        self.assertIn("Base environment", readme)
+        self.assertIn("MCP-extra environment", readme)
+        self.assertIn("scripts/mcp_server.py", readme)
+        self.assertIn("resume", recovery)
+        self.assertIn("17 `comic_*` tools", readme)
+        for platform in ("ubuntu-latest", "macos-latest", "windows-latest"):
+            self.assertIn(platform, workflow)
+        self.assertNotIn("/tmp", workflow)

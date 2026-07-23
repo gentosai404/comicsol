@@ -49,21 +49,19 @@ python3.11 -m venv ~/.venvs/comic-sol-mcp
 ~/.venvs/comic-sol-mcp/bin/pip install -r requirements.txt -r requirements-mcp.txt
 ```
 
-Register the server in your Hermes configuration (`~/.hermes/config.yaml`), locking it to a secure output directory:
+From the repository root, start the development server with a repository-relative
+script path and an absolute selected output root:
 
-```yaml
-mcp_servers:
-  comic-sol:
-    command: "/home/acer/.venvs/comic-sol-mcp/bin/python"
-    args:
-      - "/mnt/c/Users/acer/Projects/comic-sol/scripts/mcp_server.py"
-      - "--root"
-      - "/home/acer/comic-sol-output"
-    sampling:
-      enabled: false
+```bash
+OUTPUT_ROOT="$(pwd)/comic-sol-output"
+python3.11 scripts/mcp_server.py --root "$OUTPUT_ROOT"
 ```
 
-Restart Hermes to discover the 14 `comic_*` tools.
+For an MCP client configuration, resolve `python3.11`, `scripts/mcp_server.py`, and
+the selected output root to absolute paths from the current checkout. Do not copy
+paths from another machine. A portable installed CLI is not available yet. Disable
+sampling and lock the server to that output root. The server exposes the full
+deterministic lifecycle as 17 `comic_*` tools.
 
 ## Invoke
 
@@ -141,6 +139,26 @@ python3.11 -m unittest discover -s tests -v
 python3.11 scripts/comic_sol.py doctor
 ```
 
+### Base environment (Pillow only, MCP tests skipped)
+
+Create a clean virtual environment and install only the base dependency:
+
+```bash
+python3.11 -m venv /tmp/comic-sol-base
+/tmp/comic-sol-base/bin/pip install -r requirements.txt
+/tmp/comic-sol-base/bin/python -m unittest discover -s tests -v
+```
+
+MCP tests (`test_mcp_server.py`) are skipped gracefully when the `mcp` package is absent.
+
+### MCP-extra environment (Pillow + MCP, all tests run)
+
+```bash
+python3.11 -m venv /tmp/comic-sol-mcp-extra
+/tmp/comic-sol-mcp-extra/bin/pip install -r requirements.txt -r requirements-mcp.txt
+/tmp/comic-sol-mcp-extra/bin/python -m unittest discover -s tests -v
+```
+
 Clean-room Linux/macOS/WSL check:
 
 ```bash
@@ -168,7 +186,7 @@ py -3.11 -m venv "$TempRoot\venv"
 | Lettering | Comic Neue Regular/Bold; per-character Noto Sans fallback | Adaptive oval dialogue, actual inline bold emphasis, compact captions, and hybrid authored SFX are supported. Font licenses and digests are in `assets/README.md`. |
 | Image generation | Agent-exposed image model returning a local raster | References and exact dimensions are used when supported; exact authored SFX is checked by visual QA. |
 | Deterministic scripts | Python 3.11 and Pillow 11.3.0 | Offline and provider-neutral. |
-| Native MCP | Python 3.11 and MCP SDK 1.28.1 via `stdio` | Exposes 14 tools covering the full deterministic lifecycle safely locked to one output root. |
+| Native MCP | Python 3.11 and MCP SDK 1.28.1 via `stdio` | Exposes 17 tools covering the full deterministic lifecycle safely locked to one output root. |
 
 ## Privacy, IP, and Limitations
 
