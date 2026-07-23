@@ -164,9 +164,8 @@ def comic_record_attempt(
 ) -> dict[str, int]:
     """Record a generated panel attempt and manage the budget."""
     project_dir = _resolve_project(project_id)
-    attempt_path = project_dir / relative_path
     try:
-        return record_generation_attempt(project_dir, panel_id, kind, attempt_path)
+        return record_generation_attempt(project_dir, panel_id, kind, Path(relative_path))
     except Exception as e:
         raise ToolError(str(e))
 
@@ -175,9 +174,8 @@ def comic_record_attempt(
 def comic_promote_attempt(project_id: str, panel_id: str, relative_path: str) -> str:
     """Promote an attempt to be the accepted raw panel."""
     project_dir = _resolve_project(project_id)
-    attempt_path = project_dir / relative_path
     try:
-        dest = promote_attempt(project_dir, panel_id, attempt_path)
+        dest = promote_attempt(project_dir, panel_id, Path(relative_path))
         return str(dest.relative_to(project_dir).as_posix())
     except Exception as e:
         raise ToolError(str(e))

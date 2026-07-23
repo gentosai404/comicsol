@@ -15,6 +15,8 @@ from typing import Callable, Iterable
 
 from PIL import Image, UnidentifiedImageError
 
+from project_io import contained_project_path
+
 from comic_sol import (
     ALL_STATUSES,
     CATEGORY,
@@ -733,11 +735,7 @@ def validate_panel_record(data: dict[str, object]) -> list[ValidationIssue]:
 
 
 def _contained_project_path(project_dir: Path, relative_path: str) -> Path:
-    root = project_dir.resolve()
-    candidate = (root / relative_path).resolve(strict=False)
-    if not candidate.is_relative_to(root):
-        raise ValueError(f"path escapes the project boundary: {relative_path}")
-    return candidate
+    return contained_project_path(project_dir, relative_path)
 
 
 def _read_canonical_json(
@@ -754,6 +752,7 @@ def _read_canonical_json(
         _add(issues, relative_path, "file", "required file is missing")
         return None
     try:
+        path = contained_project_path(project_dir, relative_path, must_exist=True)
         raw = path.read_bytes()
         data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
@@ -809,6 +808,7 @@ def _validate_raster(
         _add(issues, issue_path, field, "referenced image is missing")
         return None
     try:
+        image_path = contained_project_path(project_dir, relative_path, must_exist=True)
         with Image.open(image_path) as image:
             if image.format not in {"PNG", "JPEG", "WEBP"}:
                 _add(issues, issue_path, field, "must contain PNG, JPEG, or WebP data")

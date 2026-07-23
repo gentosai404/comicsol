@@ -326,5 +326,40 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual("INIT", json.loads(output.getvalue())["status"])
 
 
+class SourceBoundaryTests(unittest.TestCase):
+    def test_source_over_200_kib_creates_no_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "at most 200 KiB"):
+                init_project(root, "Too Large", b"a" * (200 * 1024 + 1), {})
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_invalid_utf8_creates_no_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "UTF-8"):
+                init_project(root, "Bad Encoding", b"\xff", {})
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_cli_rejects_non_text_source_before_project_allocation(self):
+        for suffix in (".pdf", ".json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output_root = root / "output"
+                source = root / f"story{suffix}"
+                request = root / "request.json"
+                source.write_bytes(b"story")
+                atomic_write_json(request, {})
+
+                result = main([
+                    "init", "--output-root", os.fspath(output_root),
+                    "--title", "Bad Source", "--source", os.fspath(source),
+                    "--request-json", os.fspath(request),
+                ])
+
+                self.assertEqual(1, result)
+                self.assertFalse(output_root.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,12 @@ class McpServerUnitTests(unittest.TestCase):
         tools = asyncio.run(mcp_server.mcp.list_tools())
         self.assertEqual(TOOL_NAMES, {tool.name for tool in tools})
 
+    def test_init_rejects_oversized_utf8_before_project_allocation(self):
+        before = list(self.root.iterdir())
+        with self.assertRaisesRegex(ToolError, "at most 200 KiB"):
+            mcp_server.comic_init("Too Large", "a" * (200 * 1024 + 1), {})
+        self.assertEqual(before, list(self.root.iterdir()))
+
 
 class McpProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def test_stdio_protocol_exercises_all_tools(self):

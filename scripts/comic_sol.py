@@ -18,6 +18,8 @@ from typing import Literal
 
 from PIL import Image, ImageFont
 
+from project_io import contained_project_path, validate_source_bytes
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "templates"
@@ -338,6 +340,7 @@ def init_project(
         raise TypeError("request must be a JSON object")
     if not title.strip():
         raise ValueError("title must not be empty")
+    validate_source_bytes(source)
 
     project_dir = _allocate_project_directory(Path(output_root), slugify(title))
     for relative in PROJECT_DIRECTORIES:
@@ -1047,12 +1050,13 @@ def invalidate_from(project_dir: Path, stage: str) -> list[str]:
 
 
 def _contained_project_path(project_dir: Path, path: Path) -> Path:
-    project_root = project_dir.resolve()
-    candidate = path if path.is_absolute() else project_dir / path
-    resolved = candidate.resolve()
-    if resolved != project_root and project_root not in resolved.parents:
-        raise ValueError("path escapes the project directory")
-    return resolved
+    project_root = Path(project_dir).resolve(strict=True)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(project_root)
+        except ValueError as error:
+            raise ValueError("path escapes the project directory") from error
+    return contained_project_path(project_root, path)
 
 
 def _read_generation_counters(project_dir: Path) -> dict[str, object]:
@@ -1351,10 +1355,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.command == "init":
             request = read_json(arguments.request_json)
+            source = arguments.source.read_bytes()
+            validate_source_bytes(source, arguments.source.suffix)
             project = init_project(
                 arguments.output_root,
                 arguments.title,
-                arguments.source.read_bytes(),
+                source,
                 request,
             )
             print(project.resolve())

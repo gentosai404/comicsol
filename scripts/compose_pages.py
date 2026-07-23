@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageOps
 
 from comic_sol import PAGE_HEIGHT, PAGE_WIDTH, atomic_write_bytes, read_json
+from project_io import contained_project_path
 
 
 def _storyboard_page(storyboard: dict, page_number: int) -> dict:
@@ -33,16 +34,17 @@ def _artifact_path(project_dir: Path, panel_id: str, source_artifacts: dict) -> 
         configured = configured.get("path")
     candidates: list[Path] = []
     if isinstance(configured, (str, Path)):
-        candidate = Path(configured)
-        candidates.append(candidate if candidate.is_absolute() else project_dir / candidate)
-    candidates.extend((
-        project_dir / f"panels/{panel_id}/lettered.png",
-        project_dir / f"pages/{panel_id}.png",
-        project_dir / f"panels/lettered/{panel_id}.png",
+        candidates.append(contained_project_path(project_dir, configured))
+    candidates.extend(contained_project_path(project_dir, relative) for relative in (
+        f"panels/{panel_id}/lettered.png",
+        f"pages/{panel_id}.png",
+        f"panels/lettered/{panel_id}.png",
     ))
     for candidate in candidates:
         if candidate.is_file():
-            return candidate
+            return contained_project_path(
+                project_dir, candidate.relative_to(project_dir.resolve()), must_exist=True
+            )
     raise FileNotFoundError(f"missing required lettered panel image: {panel_id}")
 
 
@@ -155,8 +157,8 @@ def compose_page(
 def compose_all_pages(project_dir: Path) -> list[Path]:
     """Compose every storyboard page in numeric order after a complete preflight."""
     project_dir = Path(project_dir)
-    storyboard = read_json(project_dir / "plan/storyboard.json")
-    manifest = read_json(project_dir / "project.json")
+    storyboard = read_json(contained_project_path(project_dir, "plan/storyboard.json", must_exist=True))
+    manifest = read_json(contained_project_path(project_dir, "project.json", must_exist=True))
     settings = manifest.get("settings")
     artifacts = manifest.get("artifacts", {})
     if not isinstance(settings, dict) or not isinstance(artifacts, dict):
@@ -199,8 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.page is None:
             paths = compose_all_pages(arguments.project_dir)
         else:
-            storyboard = read_json(arguments.project_dir / "plan/storyboard.json")
-            manifest = read_json(arguments.project_dir / "project.json")
+            storyboard = read_json(contained_project_path(arguments.project_dir, "plan/storyboard.json", must_exist=True))
+            manifest = read_json(contained_project_path(arguments.project_dir, "project.json", must_exist=True))
             settings = manifest.get("settings")
             artifacts = manifest.get("artifacts", {})
             if not isinstance(settings, dict) or not isinstance(artifacts, dict):

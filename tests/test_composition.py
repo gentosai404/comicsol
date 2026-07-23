@@ -92,6 +92,31 @@ class CompositionTests(unittest.TestCase):
             compose_page(self.project, 1, self.storyboard, self.settings, {})
         self.assertFalse(output.exists())
 
+    def test_absolute_manifest_panel_path_is_rejected(self):
+        outside = Path(self.temporary_directory.name).parent / "outside-panel.png"
+        Image.new("RGB", (800, 800), "blue").save(outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+        artifacts = {"p01-01": {"path": str(outside)}}
+
+        with self.assertRaisesRegex(ValueError, "relative project path"):
+            compose_page(self.project, 1, self.storyboard, self.settings, artifacts)
+
+    def test_symlink_manifest_panel_path_is_rejected(self):
+        outside = Path(self.temporary_directory.name).parent / "outside-linked-panel.png"
+        Image.new("RGB", (800, 800), "blue").save(outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+        link = self.project / "panels/linked.png"
+        try:
+            link.symlink_to(outside)
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+
+        with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+            compose_page(
+                self.project, 1, self.storyboard, self.settings,
+                {"p01-01": {"path": "panels/linked.png"}},
+            )
+
     def test_repeated_composition_has_identical_bytes(self):
         path = compose_page(self.project, 1, self.storyboard, self.settings, {})
         first = hashlib.sha256(path.read_bytes()).hexdigest()
