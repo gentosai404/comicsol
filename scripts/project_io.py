@@ -26,35 +26,57 @@ class ProjectLock:
         self._handle: BinaryIO | None = None
 
     def __enter__(self) -> "ProjectLock":
-        handle = (self.project_dir / ".comic-sol.lock").open("a+b")
-        self._handle = handle
+        deadline = time.monotonic() + self.timeout
+        path = self.project_dir / ".comic-sol.lock"
         try:
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            handle = path.open("r+b")
+        else:
+            handle = os.fdopen(descriptor, "r+b")
+            try:
                 handle.write(b"\0")
                 handle.flush()
-            deadline = time.monotonic() + self.timeout
+            except BaseException:
+                handle.close()
+                raise
+        self._handle = handle
+        acquired = False
+        try:
             while True:
-                try:
-                    self._lock(handle)
-                    break
-                except OSError as error:
-                    if not self._retryable(error) or time.monotonic() >= deadline:
-                        if self._retryable(error):
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("project is locked by another process")
+                else:
+                    try:
+                        self._lock(handle)
+                        acquired = True
+                        break
+                    except OSError as error:
+                        if not self._retryable(error):
+                            raise
+                        if time.monotonic() >= deadline:
                             raise TimeoutError(
                                 "project is locked by another process"
                             ) from error
-                        raise
-                    remaining = max(0.0, deadline - time.monotonic())
-                    time.sleep(min(_LOCK_RETRY_SECONDS, remaining))
+                remaining = max(0.0, deadline - time.monotonic())
+                time.sleep(min(_LOCK_RETRY_SECONDS, remaining))
             handle.seek(0)
             handle.truncate()
             handle.write(f"{os.getpid()}\n".encode("ascii"))
             handle.flush()
             return self
         except BaseException:
-            handle.close()
-            self._handle = None
+            try:
+                if acquired:
+                    try:
+                        self._unlock(handle)
+                    except BaseException:
+                        pass
+            finally:
+                handle.close()
+                self._handle = None
             raise
 
     @staticmethod
@@ -75,21 +97,25 @@ class ProjectLock:
             error, "winerror", None
         ) in {33, 36}
 
+    @staticmethod
+    def _unlock(handle: BinaryIO) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def __exit__(self, exc_type, exc, traceback) -> None:
         handle = self._handle
         self._handle = None
         if handle is None:
             return
         try:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            self._unlock(handle)
         finally:
             handle.close()
 
