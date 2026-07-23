@@ -29,6 +29,7 @@ from comic_sol import (  # noqa: E402
     slugify,
     transition,
 )
+from project_io import ProjectTransaction
 import comic_sol  # noqa: E402
 import letter_panels  # noqa: E402
 
@@ -185,8 +186,9 @@ class ManifestTests(unittest.TestCase):
             {"mode": "short_prompt", "language": "en"},
         )
         before = (project / "project.json").read_bytes()
+        # Mock transaction commit to simulate event write failure
         with mock.patch.object(
-            comic_sol, "append_event", side_effect=OSError("event write failed")
+            ProjectTransaction, "commit", side_effect=OSError("event write failed")
         ):
             with self.assertRaisesRegex(OSError, "event write failed"):
                 transition(project, "PLANNED")

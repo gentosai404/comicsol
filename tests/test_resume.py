@@ -20,6 +20,7 @@ from comic_sol import (  # noqa: E402
     atomic_write_json,
     block_project,
     build_resume_plan,
+    canonical_json_bytes,
     init_project,
     invalidate_from,
     main,
@@ -324,8 +325,7 @@ class ResumeTests(unittest.TestCase):
     def test_invalidate_removes_manifest_entries_but_preserves_files(self):
         storyboard_path = self.project / "plan/storyboard.json"
         before = storyboard_path.read_bytes()
-        with patch("comic_sol.atomic_write_json", wraps=atomic_write_json) as writer:
-            removed = invalidate_from(self.project, "storyboard")
+        removed = invalidate_from(self.project, "storyboard")
         self.assertEqual(["storyboard", "qa_report", "pdf"], removed)
         self.assertEqual(before, storyboard_path.read_bytes())
         self.assertNotIn("storyboard", read_json(self.project / "project.json")["artifacts"])
@@ -333,8 +333,8 @@ class ResumeTests(unittest.TestCase):
             {"planning"},
             set(read_json(self.project / "logs/stage-cache.json")["stages"]),
         )
-        published = [Path(call.args[0]).name for call in writer.call_args_list]
-        self.assertEqual(["stage-cache.json", "project.json"], published)
+        transactions = self.project / "logs/transactions"
+        self.assertEqual([], list(transactions.iterdir()) if transactions.exists() else [])
 
     def test_attempt_is_retained_until_verified_promotion(self):
         attempt = self.project / "panels/raw/p01-01.attempt-2.png"
@@ -741,10 +741,7 @@ class ResumeTests(unittest.TestCase):
         cache = read_json(cache_path)
         self.assertEqual({"schema_version", "stages"}, set(cache))
         self.assertEqual({"planning"}, set(cache["stages"]))
-        self.assertEqual(
-            (json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-            cache_path.read_bytes(),
-        )
+        self.assertEqual(canonical_json_bytes(cache), cache_path.read_bytes())
         self.assertEqual([], list(cache_path.parent.glob(f".{cache_path.name}.*.tmp")))
 
     def test_record_stage_refuses_missing_expected_output(self):

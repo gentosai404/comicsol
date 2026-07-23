@@ -401,12 +401,8 @@ def _sanitize_event_details(details: dict[str, object]) -> dict[str, object]:
     return sanitized
 
 
-def append_event(
-    project_dir: Path,
-    event: str,
-    details: dict[str, object],
-) -> None:
-    """Append one sanitized canonical JSON object to the project event log."""
+def canonical_event_record(event: str, details: dict[str, object]) -> bytes:
+    """Build one sanitized canonical event line without publishing it."""
     if not isinstance(event, str) or not CATEGORY.fullmatch(event):
         raise ValueError("event name must be a sanitized category")
     if not isinstance(details, dict):
@@ -416,10 +412,25 @@ def append_event(
         "event": event,
         "timestamp": _utc_now(),
     }
+    return canonical_json_bytes(event_record) + b"\n"
+
+
+def _event_log_with(project_dir: Path, event: str, details: dict[str, object]) -> bytes:
+    event_path = contained_project_path(project_dir, "logs/events.jsonl")
+    prior = event_path.read_bytes() if event_path.is_file() else b""
+    return prior + canonical_event_record(event, details)
+
+
+def append_event(
+    project_dir: Path,
+    event: str,
+    details: dict[str, object],
+) -> None:
+    """Append one sanitized canonical JSON object to the project event log."""
     event_path = Path(project_dir) / "logs/events.jsonl"
     event_path.parent.mkdir(parents=True, exist_ok=True)
     with event_path.open("ab") as handle:
-        handle.write(canonical_json_bytes(event_record) + b"\n")
+        handle.write(canonical_event_record(event, details))
         handle.flush()
         os.fsync(handle.fileno())
 
@@ -470,12 +481,14 @@ def transition(
     manifest["status"] = target
     manifest["updated_at"] = _utc_now()
 
-    append_event(
+    events = _event_log_with(
         project_dir,
         "project.transitioned",
         {"from": current, "to": target, "warning_present": warning is not None},
     )
-    atomic_write_json(manifest_path, manifest)
+    with ProjectTransaction(project_dir, "transition") as tx:
+        tx.stage_bytes("logs/events.jsonl", events)
+        tx.stage_bytes("project.json", canonical_json_bytes(manifest))
     return manifest
 
 
@@ -777,8 +790,14 @@ def record_stage(project_dir: Path, stage: str) -> dict[str, object]:
     stages = cache["stages"]
     assert isinstance(stages, dict)
     stages[stage] = {"artifacts": artifacts, "key": key}
-    atomic_write_json(cache_path, cache)
-    append_event(project_dir, "stage.recorded", {"action": stage})
+    updated_cache = canonical_json_bytes(cache)
+    updated_manifest = canonical_json_bytes(manifest)
+    with ProjectTransaction(project_dir, "stage-committed") as tx:
+        tx.stage_bytes(str(STAGE_CACHE_PATH), updated_cache)
+        tx.stage_bytes(
+            "logs/events.jsonl",
+            _event_log_with(project_dir, "stage.recorded", {"action": stage}),
+        )
     return {"artifacts": len(artifacts), "stage": stage}
 
 
@@ -1117,13 +1136,15 @@ def resume_project(project_dir: Path) -> dict[str, object]:
                 "invalidated": [],
                 "next_action": {"required": "image capability available"},
             }
-        if stale_stage is not None:
-            invalidate_from(project_dir, stale_stage)
-            manifest = read_json(manifest_path)
-        recovery_status = STAGE_COMPLETION_STATUS[preserved[-1]] if preserved else "INIT"
+        # Drop outer lock so invalidate_from can acquire its own ProjectTransaction lock
+    if stale_stage is not None:
+        invalidate_from(project_dir, stale_stage)
+    recovery_status = STAGE_COMPLETION_STATUS[preserved[-1]] if preserved else "INIT"
+    with ProjectLock(project_dir):
+        manifest = read_json(manifest_path)
         warnings = manifest.get("warnings")
         if not isinstance(warnings, list):
-            raise ValueError("manifest warnings must be an array")
+            warnings = []
         manifest["warnings"] = [
             item for item in warnings if _warning_reason(item) != reason
         ]
@@ -1162,6 +1183,7 @@ def invalidate_from(project_dir: Path, stage: str) -> list[str]:
     manifest["status"] = STAGE_INVALIDATION_STATUS[stage]
     manifest["updated_at"] = _utc_now()
 
+    cache_bytes: bytes | None = None
     cache_path = project_dir / STAGE_CACHE_PATH
     if cache_path.is_file():
         cache, _ = _load_stage_cache(cache_path)
@@ -1169,8 +1191,12 @@ def invalidate_from(project_dir: Path, stage: str) -> list[str]:
         if isinstance(cached_stages, dict):
             for downstream in RESUME_STAGES[start:]:
                 cached_stages.pop(downstream, None)
-            atomic_write_json(cache_path, cache)
-    atomic_write_json(manifest_path, manifest)
+            cache_bytes = canonical_json_bytes(cache)
+
+    with ProjectTransaction(project_dir, "invalidate") as tx:
+        if cache_bytes is not None:
+            tx.stage_bytes(str(STAGE_CACHE_PATH), cache_bytes)
+        tx.stage_bytes("project.json", canonical_json_bytes(manifest))
     return removed
 
 
@@ -1393,13 +1419,18 @@ def record_override(project_dir: Path, panel_id: str, reason: str) -> None:
     record["decision"] = "accept_with_warnings"
     record["retry_reason"] = None
     record["override_reason"] = normalized_reason
-    atomic_write_json(record_path, record)
 
     if normalized_reason not in manifest_warnings:
         manifest_warnings.append(normalized_reason)
         manifest["updated_at"] = _utc_now()
-        atomic_write_json(manifest_path, manifest)
-    append_event(project_dir, "panel.overridden", {"panel_id": panel_id, "action": "accepted"})
+
+    with ProjectTransaction(project_dir, "override") as tx:
+        tx.stage_bytes(f"qa/panels/{panel_id}.json", canonical_json_bytes(record))
+        tx.stage_bytes("project.json", canonical_json_bytes(manifest))
+        tx.stage_bytes(
+            "logs/events.jsonl",
+            _event_log_with(project_dir, "panel.overridden", {"panel_id": panel_id, "action": "accepted"}),
+        )
 
 
 def doctor(output_root: Path) -> tuple[bool, list[str]]:
