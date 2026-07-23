@@ -15,10 +15,13 @@ from typing import Callable, Iterable
 
 from PIL import Image, UnidentifiedImageError
 
+from project_io import contained_project_path
+
 from comic_sol import (
     ALL_STATUSES,
     CATEGORY,
     GUTTER,
+    LINEAR_STATUSES,
     MARGIN,
     PAGE_HEIGHT,
     PAGE_WIDTH,
@@ -32,7 +35,7 @@ ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 PANEL_ID_PATTERN = re.compile(r"^p[0-9]{2}-[0-9]{2}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TIMESTAMP_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-STAGES = ("all", "plan", "storyboard", "panels", "final")
+STAGES = ("all", "plan", "storyboard", "panels", "final", "export-ready")
 LAYOUTS = {
     "full-page",
     "two-horizontal",
@@ -198,12 +201,13 @@ def _string_list(
 def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
     path = "project.json"
     issues: list[ValidationIssue] = []
-    fields = {
+    required_fields = {
         "schema_version", "project_id", "title", "created_at", "updated_at",
         "status", "input", "settings", "capability", "artifacts",
         "stage_versions", "panels", "warnings",
     }
-    root = _object(data, fields, fields, issues, path, "")
+    fields = required_fields | {"blocked_from", "blocked_reason"}
+    root = _object(data, fields, required_fields, issues, path, "")
     if root is None:
         return _sorted(issues)
     if root.get("schema_version") != "1.0":
@@ -214,6 +218,17 @@ def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
     _timestamp(root.get("updated_at"), issues, path, "updated_at")
     if root.get("status") not in ALL_STATUSES:
         _add(issues, path, "status", "unknown manifest status")
+    if root.get("status") == "BLOCKED":
+        if root.get("blocked_from") not in LINEAR_STATUSES:
+            _add(issues, path, "blocked_from", "must be a normal pipeline status")
+        blocked_reason = root.get("blocked_reason")
+        if (
+            not isinstance(blocked_reason, str)
+            or CATEGORY.fullmatch(blocked_reason) is None
+        ):
+            _add(issues, path, "blocked_reason", "must be a stable category")
+    elif root.get("blocked_from") is not None or root.get("blocked_reason") is not None:
+        _add(issues, path, "status", "blocked fields must be null when not BLOCKED")
 
     input_fields = {"mode", "source_path", "source_sha256", "request_path", "language"}
     input_data = _object(root.get("input"), input_fields, input_fields, issues, path, "input")
@@ -263,7 +278,7 @@ def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
         if capability.get("status") in {"available", "unavailable"} and capability.get("detected_at") is None:
             _add(issues, path, "capability.detected_at", "is required after capability detection")
 
-    artifacts = _object(root.get("artifacts"), {"story_plan", "character_bible", "storyboard", "qa_report", "pdf"}, set(), issues, path, "artifacts")
+    artifacts = _object(root.get("artifacts"), {"story_plan", "character_bible", "storyboard", "qa_report", "pdf", "composition_cache"}, set(), issues, path, "artifacts")
     if artifacts is not None:
         for name, descriptor in artifacts.items():
             item = _object(descriptor, {"path", "sha256"}, {"path", "sha256"}, issues, path, f"artifacts.{name}")
@@ -733,11 +748,7 @@ def validate_panel_record(data: dict[str, object]) -> list[ValidationIssue]:
 
 
 def _contained_project_path(project_dir: Path, relative_path: str) -> Path:
-    root = project_dir.resolve()
-    candidate = (root / relative_path).resolve(strict=False)
-    if not candidate.is_relative_to(root):
-        raise ValueError(f"path escapes the project boundary: {relative_path}")
-    return candidate
+    return contained_project_path(project_dir, relative_path)
 
 
 def _read_canonical_json(
@@ -754,6 +765,7 @@ def _read_canonical_json(
         _add(issues, relative_path, "file", "required file is missing")
         return None
     try:
+        path = contained_project_path(project_dir, relative_path, must_exist=True)
         raw = path.read_bytes()
         data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
@@ -809,6 +821,7 @@ def _validate_raster(
         _add(issues, issue_path, field, "referenced image is missing")
         return None
     try:
+        image_path = contained_project_path(project_dir, relative_path, must_exist=True)
         with Image.open(image_path) as image:
             if image.format not in {"PNG", "JPEG", "WEBP"}:
                 _add(issues, issue_path, field, "must contain PNG, JPEG, or WebP data")
@@ -839,6 +852,31 @@ def _storyboard_panel_map(storyboard: dict[str, object]) -> dict[str, dict[str, 
     return result
 
 
+def validate_page_qa_record(record: dict[str, object]) -> list[ValidationIssue]:
+    """Validate a page-QA record schema."""
+    issues: list[ValidationIssue] = []
+    allowed = {"page", "page_path", "page_sha256", "schema_version", "status"}
+    required = {"page", "page_path", "page_sha256", "schema_version", "status"}
+    data = _object(record, allowed, required, issues, "qa/pages/", "")
+    if data is not None:
+        page = data.get("page")
+        if not isinstance(page, int) or page < 1:
+            _add(issues, "qa/pages/", "page", "must be a positive integer")
+        _relative_path(data.get("page_path"), issues, "qa/pages/", "page_path")
+        _sha256(data.get("page_sha256"), issues, "qa/pages/", "page_sha256")
+        status = data.get("status")
+        if status != "reviewed":
+            _add(issues, "qa/pages/", "status", 'must be "reviewed"')
+    return _sorted(issues)
+
+
+def require_valid_project(project_dir: Path, stage: str) -> None:
+    """Raise ProjectValidationError when the project fails validation."""
+    issues = validate_project(project_dir, stage)
+    if issues:
+        raise ProjectValidationError(issues)
+
+
 def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIssue]:
     project_dir = Path(project_dir)
     if stage not in STAGES:
@@ -848,9 +886,9 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
 
     issues: list[ValidationIssue] = []
     manifest = _load_artifact(project_dir, "project.json", validate_manifest, issues)
-    needs_plan = stage in {"all", "plan", "storyboard", "panels", "final"}
-    needs_storyboard = stage in {"all", "storyboard", "panels", "final"}
-    needs_panels = stage in {"all", "panels", "final"}
+    needs_plan = stage in {"all", "plan", "storyboard", "panels", "final", "export-ready"}
+    needs_storyboard = stage in {"all", "storyboard", "panels", "final", "export-ready"}
+    needs_panels = stage in {"all", "panels", "final", "export-ready"}
     story = None
     characters = None
     storyboard = None
@@ -908,7 +946,7 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
             if record is None:
                 continue
             issues.extend(validate_panel_record(record))
-            if stage in {"all", "final"}:
+            if stage in {"all", "final", "export-ready"}:
                 checks = record.get("checks")
                 has_error_failure = isinstance(checks, list) and any(
                     isinstance(check, dict)
@@ -961,8 +999,12 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                 except ValueError:
                     pass
                 else:
-                    if image_path.is_file() and SHA256_PATTERN.fullmatch(raw_hash) and sha256_file(image_path) != raw_hash:
-                        _add(issues, record_relative, "raw_sha256", "hash does not match the raw image")
+                    if image_path.is_file() and SHA256_PATTERN.fullmatch(raw_hash):
+                        image_path = contained_project_path(
+                            project_dir, raw_path, must_exist=True
+                        )
+                        if sha256_file(image_path) != raw_hash:
+                            _add(issues, record_relative, "raw_sha256", "hash does not match the raw image")
             prompt_path = record.get("source_prompt_path")
             if isinstance(prompt_path, str):
                 try:
@@ -993,10 +1035,14 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                 else:
                     if not source_file.is_file():
                         _add(issues, "project.json", "input.source_path", "referenced source is missing")
-                    elif SHA256_PATTERN.fullmatch(source_hash) and sha256_file(source_file) != source_hash:
-                        _add(issues, "project.json", "input.source_sha256", "hash does not match the source")
+                    elif SHA256_PATTERN.fullmatch(source_hash):
+                        source_file = contained_project_path(
+                            project_dir, source_path, must_exist=True
+                        )
+                        if sha256_file(source_file) != source_hash:
+                            _add(issues, "project.json", "input.source_sha256", "hash does not match the source")
 
-    if stage in {"all", "final"} and manifest is not None:
+    if stage in {"all", "final", "export-ready"} and manifest is not None:
         for record_path, reason in panel_errors:
             _add(
                 issues,
@@ -1048,9 +1094,132 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                     else:
                         if not artifact.is_file():
                             _add(issues, "project.json", f"artifacts.{name}.path", "referenced artifact is missing")
-                        elif SHA256_PATTERN.fullmatch(expected_hash) and sha256_file(artifact) != expected_hash:
-                            _add(issues, "project.json", f"artifacts.{name}.sha256", "hash does not match the artifact")
+                        elif SHA256_PATTERN.fullmatch(expected_hash):
+                            artifact = contained_project_path(
+                                project_dir, relative_path, must_exist=True
+                            )
+                            if sha256_file(artifact) != expected_hash:
+                                _add(issues, "project.json", f"artifacts.{name}.sha256", "hash does not match the artifact")
+
+    # Fail-closed artifact enumeration for terminal / export-ready stages.
+    if stage in {"all", "final", "export-ready"} and manifest is not None:
+        settings = manifest.get("settings")
+        page_count_value = settings.get("page_count") if isinstance(settings, dict) else 0
+        page_count = (
+            page_count_value
+            if isinstance(page_count_value, int) and not isinstance(page_count_value, bool)
+            else 0
+        )
+        panels = manifest.get("panels", [])
+        if not isinstance(panels, list):
+            panels = []
+        panel_count = len(panels)
+
+        _validate_required_artifacts(
+            project_dir, manifest, page_count, panels, issues,
+            require_terminal=(stage != "export-ready"),
+        )
+
+        # Page-QA records.
+
+        # Page-QA records.
+        for page_number in range(1, int(page_count) + 1):
+            page_qa_relative = f"qa/pages/page-{page_number:03d}.json"
+            page_qa = _read_canonical_json(project_dir, page_qa_relative, issues)
+            expected_page = f"pages/page-{page_number:03d}.png"
+            if page_qa is not None:
+                issues.extend(validate_page_qa_record(page_qa))
+                if page_qa.get("page") != page_number:
+                    _add(issues, page_qa_relative, "page",
+                         "must match the canonical page number")
+                if page_qa.get("page_path") != expected_page:
+                    _add(issues, page_qa_relative, "page_path",
+                         "must match the canonical page path")
+            page_path = project_dir / expected_page
+            if not page_path.is_file():
+                _add(issues, expected_page, "", "composed page is missing")
+            else:
+                page_hash = sha256_file(page_path)
+                if page_qa is not None and isinstance(page_qa.get("page_sha256"), str):
+                    if page_qa["page_sha256"] != page_hash:
+                        _add(issues, page_qa_relative, "page_sha256",
+                             "hash does not match the page image")
+
+        # Lettered panels.
+        for panel_id in panels:
+            lettered = project_dir / f"panels/{panel_id}/lettered.png"
+            if not lettered.is_file():
+                _add(issues, f"panels/{panel_id}/lettered.png", "",
+                     "lettered panel is missing")
+
+        # export-ready does not require report, PDF, or export cache.
+        if stage != "export-ready":
+            report_path = project_dir / "qa/report.md"
+            if not report_path.is_file():
+                _add(issues, "qa/report.md", "", "QA report is missing")
+
+            project_id = manifest.get("project_id")
+            if isinstance(project_id, str) and project_id:
+                pdf_path = project_dir / f"exports/{project_id}.pdf"
+                if not pdf_path.is_file():
+                    _add(issues, f"exports/{project_id}.pdf", "",
+                         "exported PDF is missing")
+
+        # Composition cache required.
+        comp_cache = project_dir / "cache/composition.json"
+        if not comp_cache.is_file():
+            _add(issues, "cache/composition.json", "",
+                 "composition stage cache is missing")
+
     return _sorted(issues)
+
+
+REQUIRED_ARTIFACT_DESCRIPTORS = frozenset({
+    "character_bible", "story_plan", "storyboard",
+    "qa_report", "pdf",
+})
+
+
+def _validate_required_artifacts(
+    project_dir: Path,
+    manifest: dict[str, object],
+    page_count: int,
+    panels: list[str],
+    issues: list[ValidationIssue],
+    require_terminal: bool,
+) -> None:
+    """Report missing required artifact descriptors."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    required = {
+        "character_bible", "story_plan", "storyboard", "composition_cache",
+    }
+    if require_terminal:
+        required.update({"qa_report", "pdf"})
+    for name in sorted(required):
+        if name not in artifacts:
+            _add(issues, "project.json", f"artifacts.{name}",
+                 "required artifact descriptor is missing")
+
+    expected_paths = {
+        "character_bible": "plan/character-bible.json",
+        "story_plan": "plan/story-plan.json",
+        "storyboard": "plan/storyboard.json",
+        "composition_cache": "cache/composition.json",
+    }
+    if require_terminal:
+        project_id = manifest.get("project_id")
+        if isinstance(project_id, str):
+            expected_paths.update({
+                "qa_report": "qa/report.md",
+                "pdf": f"exports/{project_id}.pdf",
+            })
+    for name, expected in expected_paths.items():
+        descriptor = artifacts.get(name)
+        if isinstance(descriptor, dict) and descriptor.get("path") != expected:
+            _add(issues, "project.json", f"artifacts.{name}.path",
+                 f"must equal {expected}")
 
 
 class _ValidationArgumentParser(argparse.ArgumentParser):

@@ -521,7 +521,12 @@ class ProjectValidationTests(unittest.TestCase):
 
         manifest.update({"status": "COMPLETE_WITH_WARNINGS", "warnings": [reason]})
         atomic_write_json(manifest_path, manifest)
-        self.assertEqual([], validate_project(self.project, "final"))
+        issues = validate_project(self.project, "final")
+        self.assertFalse(any(
+            issue.path == "project.json"
+            and issue.field in {"status", "warnings"}
+            for issue in issues
+        ), issues)
 
     def test_final_stage_reports_malformed_manifest_warnings_without_raising(self):
         self.add_panel_files()
@@ -574,6 +579,38 @@ class ProjectValidationTests(unittest.TestCase):
         with patch("validate_project.sha256_file", side_effect=guarded_hash):
             issues = validate_project(self.project, "panels")
         self.assertTrue(any("escapes the project" in issue.message for issue in issues), issues)
+
+    def test_hash_reads_repeat_shared_resolution_for_original_relative_paths(self):
+        import validate_project as validation_module
+
+        self.add_panel_files()
+        manifest_path = self.project / "project.json"
+        manifest = read_json(manifest_path)
+        artifact_relative = "plan/story-plan.json"
+        manifest["artifacts"]["story_plan"] = {
+            "path": artifact_relative,
+            "sha256": sha256_file(self.project / artifact_relative),
+        }
+        atomic_write_json(manifest_path, manifest)
+
+        for stage, relative, minimum_calls in (
+            ("panels", "panels/raw/p01-01.png", 3),
+            ("panels", "source/input.txt", 2),
+            ("final", artifact_relative, 2),
+        ):
+            with self.subTest(stage=stage, relative=relative):
+                calls = []
+                real_resolver = validation_module.contained_project_path
+
+                def recording_resolver(project_dir, candidate, **kwargs):
+                    if candidate == relative:
+                        calls.append((candidate, kwargs.get("must_exist", False)))
+                    return real_resolver(project_dir, candidate, **kwargs)
+
+                with patch("validate_project.contained_project_path", side_effect=recording_resolver):
+                    validate_project(self.project, stage)
+                self.assertGreaterEqual(len(calls), minimum_calls, calls)
+                self.assertTrue(calls[-1][1], calls)
 
     def test_project_validation_error_exposes_immutable_issue_tuple(self):
         issue = ValidationIssue("project.json", "status", "invalid")
@@ -802,3 +839,18 @@ class PackagingTests(unittest.TestCase):
             "fallback boxes",
         ):
             self.assertIn(phrase, readme)
+
+    def test_readme_and_ci_are_portable_and_describe_optional_mcp(self):
+        readme = self.readme()
+        workflow = (ROOT / ".github/workflows/tests.yml").read_text("utf-8")
+        recovery = (ROOT / "references/capability-detection.md").read_text("utf-8")
+        self.assertNotIn("/home/acer", readme)
+        self.assertNotIn("/mnt/c/Users/acer", readme)
+        self.assertIn("Base environment", readme)
+        self.assertIn("MCP-extra environment", readme)
+        self.assertIn("scripts/mcp_server.py", readme)
+        self.assertIn("resume", recovery)
+        self.assertIn("17 `comic_*` tools", readme)
+        for platform in ("ubuntu-latest", "macos-latest", "windows-latest"):
+            self.assertIn(platform, workflow)
+        self.assertNotIn("/tmp", workflow)

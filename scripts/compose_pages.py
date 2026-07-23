@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageOps
 
 from comic_sol import PAGE_HEIGHT, PAGE_WIDTH, atomic_write_bytes, read_json
+from project_io import ProjectTransaction, contained_project_path
 
 
 def _storyboard_page(storyboard: dict, page_number: int) -> dict:
@@ -27,30 +28,33 @@ def _storyboard_page(storyboard: dict, page_number: int) -> dict:
     return matches[0]
 
 
-def _artifact_path(project_dir: Path, panel_id: str, source_artifacts: dict) -> Path:
+def _artifact_path(project_dir: Path, panel_id: str, source_artifacts: dict) -> str | Path:
     configured = source_artifacts.get(panel_id)
     if isinstance(configured, dict):
         configured = configured.get("path")
-    candidates: list[Path] = []
+    candidates: list[str | Path] = []
     if isinstance(configured, (str, Path)):
-        candidate = Path(configured)
-        candidates.append(candidate if candidate.is_absolute() else project_dir / candidate)
+        candidates.append(configured)
     candidates.extend((
-        project_dir / f"panels/{panel_id}/lettered.png",
-        project_dir / f"pages/{panel_id}.png",
-        project_dir / f"panels/lettered/{panel_id}.png",
+        f"panels/{panel_id}/lettered.png",
+        f"pages/{panel_id}.png",
+        f"panels/lettered/{panel_id}.png",
     ))
-    for candidate in candidates:
+    for relative in candidates:
+        candidate = contained_project_path(project_dir, relative)
         if candidate.is_file():
-            return candidate
+            contained_project_path(project_dir, relative, must_exist=True)
+            return relative
     raise FileNotFoundError(f"missing required lettered panel image: {panel_id}")
 
 
-def _page_sources(project_dir: Path, page: dict, source_artifacts: dict) -> list[tuple[dict, Path]]:
+def _page_sources(
+    project_dir: Path, page: dict, source_artifacts: dict
+) -> list[tuple[dict, str | Path]]:
     panels = page.get("panels")
     if not isinstance(panels, list):
         raise ValueError(f"page {page.get('number')} panels must be an array")
-    sources: list[tuple[dict, Path]] = []
+    sources: list[tuple[dict, str | Path]] = []
     missing: list[str] = []
     for panel in panels:
         if not isinstance(panel, dict) or not isinstance(panel.get("id"), str):
@@ -97,15 +101,19 @@ def _rect(panel: dict) -> tuple[int, int, int, int]:
 
 
 def _compose_to_bytes(
+    project_dir: Path,
     page: dict,
-    sources: list[tuple[dict, Path]],
+    sources: list[tuple[dict, str | Path]],
     manifest_settings: dict,
 ) -> bytes:
     canvas = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), _background_color(manifest_settings))
     draw = ImageDraw.Draw(canvas)
-    for panel, source_path in sources:
+    for panel, source_relative in sources:
         x, y, width, height = _rect(panel)
         try:
+            source_path = contained_project_path(
+                project_dir, source_relative, must_exist=True
+            )
             with Image.open(source_path) as source:
                 source.load()
                 fitted = ImageOps.fit(
@@ -146,7 +154,7 @@ def compose_page(
     project_dir = Path(project_dir)
     page = _storyboard_page(storyboard, page_number)
     sources = _page_sources(project_dir, page, source_artifacts)
-    payload = _compose_to_bytes(page, sources, manifest_settings)
+    payload = _compose_to_bytes(project_dir, page, sources, manifest_settings)
     output_path = project_dir / f"pages/page-{page_number:03d}.png"
     atomic_write_bytes(output_path, payload)
     return output_path
@@ -155,8 +163,8 @@ def compose_page(
 def compose_all_pages(project_dir: Path) -> list[Path]:
     """Compose every storyboard page in numeric order after a complete preflight."""
     project_dir = Path(project_dir)
-    storyboard = read_json(project_dir / "plan/storyboard.json")
-    manifest = read_json(project_dir / "project.json")
+    storyboard = read_json(contained_project_path(project_dir, "plan/storyboard.json", must_exist=True))
+    manifest = read_json(contained_project_path(project_dir, "project.json", must_exist=True))
     settings = manifest.get("settings")
     artifacts = manifest.get("artifacts", {})
     if not isinstance(settings, dict) or not isinstance(artifacts, dict):
@@ -171,12 +179,21 @@ def compose_all_pages(project_dir: Path) -> list[Path]:
     if len(page_numbers) != len(pages) or page_numbers != list(range(1, len(pages) + 1)):
         raise ValueError("storyboard pages must be numbered contiguously from 1")
 
-    for number in page_numbers:
-        _page_sources(project_dir, _storyboard_page(storyboard, number), artifacts)
-    return [
-        compose_page(project_dir, number, storyboard, settings, artifacts)
+    prepared_pages = [
+        (number, _storyboard_page(storyboard, number), _page_sources(project_dir, _storyboard_page(storyboard, number), artifacts))
         for number in page_numbers
     ]
+    payloads = [
+        (f"pages/page-{number:03d}.png", _compose_to_bytes(project_dir, page, sources, settings))
+        for number, page, sources in prepared_pages
+    ]
+    output_paths = []
+    with ProjectTransaction(project_dir, "composition") as transaction:
+        for relative, payload in payloads:
+            transaction.stage_bytes(relative, payload)
+            output_paths.append(project_dir / relative)
+        transaction.commit()
+    return output_paths
 
 
 def compose_project(project_dir: Path) -> list[Path]:
@@ -199,8 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.page is None:
             paths = compose_all_pages(arguments.project_dir)
         else:
-            storyboard = read_json(arguments.project_dir / "plan/storyboard.json")
-            manifest = read_json(arguments.project_dir / "project.json")
+            storyboard = read_json(contained_project_path(arguments.project_dir, "plan/storyboard.json", must_exist=True))
+            manifest = read_json(contained_project_path(arguments.project_dir, "project.json", must_exist=True))
             settings = manifest.get("settings")
             artifacts = manifest.get("artifacts", {})
             if not isinstance(settings, dict) or not isinstance(artifacts, dict):

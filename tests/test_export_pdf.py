@@ -120,6 +120,15 @@ class PdfExportTests(unittest.TestCase):
         self.assertNotIn(b"CreationDate", payload)
         self.assertNotIn(b"ModDate", payload)
 
+    def test_final_pdf_publication_uses_durable_atomic_writer(self):
+        destination = self.project / "exports/durable.pdf"
+        real_writer = __import__("export_pdf").durable_atomic_write
+        with mock.patch("export_pdf.durable_atomic_write", wraps=real_writer) as writer:
+            self.assertEqual(destination, export_pdf(self.project, destination))
+        writer.assert_called_once()
+        self.assertEqual(destination, writer.call_args.args[0])
+        self.assertTrue(writer.call_args.args[1].startswith(b"%PDF"))
+
     def test_missing_noncontiguous_and_wrong_size_pages_are_refused_atomically(self):
         output = self.project / "exports/ordered-comic.pdf"
         output.write_bytes(b"previous-good-pdf")

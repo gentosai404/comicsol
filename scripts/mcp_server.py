@@ -12,6 +12,7 @@ from comic_sol import (
     init_project,
     transition,
     build_resume_plan,
+    resume_project,
     invalidate_from,
     record_stage,
     record_generation_attempt,
@@ -24,6 +25,7 @@ from validate_project import validate_project, ProjectValidationError
 from letter_panels import letter_project
 from compose_pages import compose_project
 from export_pdf import export_pdf
+from render_report import render_report
 
 # Root directory allowed for operations. All project IDs resolve relative to this.
 OUTPUT_ROOT: Path
@@ -136,6 +138,16 @@ def comic_resume_plan(project_id: str) -> list[dict[str, str]]:
 
 
 @mcp.tool()
+def comic_resume(project_id: str) -> dict[str, Any]:
+    """Recover a BLOCKED project to its last valid state."""
+    project_dir = _resolve_project(project_id)
+    try:
+        return resume_project(project_dir)
+    except Exception as e:
+        raise ToolError(str(e))
+
+
+@mcp.tool()
 def comic_invalidate(project_id: str, stage: str) -> list[str]:
     """Invalidate a stage and its downstream dependents."""
     project_dir = _resolve_project(project_id)
@@ -164,9 +176,8 @@ def comic_record_attempt(
 ) -> dict[str, int]:
     """Record a generated panel attempt and manage the budget."""
     project_dir = _resolve_project(project_id)
-    attempt_path = project_dir / relative_path
     try:
-        return record_generation_attempt(project_dir, panel_id, kind, attempt_path)
+        return record_generation_attempt(project_dir, panel_id, kind, Path(relative_path))
     except Exception as e:
         raise ToolError(str(e))
 
@@ -175,9 +186,8 @@ def comic_record_attempt(
 def comic_promote_attempt(project_id: str, panel_id: str, relative_path: str) -> str:
     """Promote an attempt to be the accepted raw panel."""
     project_dir = _resolve_project(project_id)
-    attempt_path = project_dir / relative_path
     try:
-        dest = promote_attempt(project_dir, panel_id, attempt_path)
+        dest = promote_attempt(project_dir, panel_id, Path(relative_path))
         return str(dest.relative_to(project_dir).as_posix())
     except Exception as e:
         raise ToolError(str(e))
@@ -223,6 +233,28 @@ def comic_export(project_id: str) -> str:
     try:
         dest = export_pdf(project_dir)
         return str(dest.relative_to(project_dir).as_posix())
+    except Exception as e:
+        raise ToolError(str(e))
+
+
+@mcp.tool()
+def comic_render_report(project_id: str) -> str:
+    """Render the QA report."""
+    project_dir = _resolve_project(project_id)
+    try:
+        dest = render_report(project_dir)
+        return str(dest.relative_to(project_dir).as_posix())
+    except Exception as e:
+        raise ToolError(str(e))
+
+
+@mcp.tool()
+def comic_finalize(project_id: str) -> dict[str, Any]:
+    """Run all deterministic finalization steps: validate, letter, compose, export, report, transition."""
+    project_dir = _resolve_project(project_id)
+    try:
+        from comic_sol import finalize_project
+        return finalize_project(project_dir)
     except Exception as e:
         raise ToolError(str(e))
 

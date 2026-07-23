@@ -19,6 +19,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from comic_sol import atomic_write_bytes, read_json
+from project_io import contained_project_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -730,7 +731,9 @@ def _letter_project_with_summaries(
 ) -> tuple[list[Path], list[dict]]:
     """Letter every accepted project panel and collect outputs plus summaries."""
     project_dir = Path(project_dir)
-    storyboard = read_json(project_dir / "plan/storyboard.json")
+    storyboard = read_json(
+        contained_project_path(project_dir, "plan/storyboard.json", must_exist=True)
+    )
     pages = storyboard.get("pages")
     if not isinstance(pages, list) or not pages:
         raise ValueError("storyboard pages must be a non-empty array")
@@ -754,7 +757,9 @@ def _letter_project_with_summaries(
             if not isinstance(panel.get("text"), list):
                 raise ValueError(f"storyboard panel {panel_id} text must be an array")
             panels.append(panel)
-    bible = read_json(project_dir / "plan/character-bible.json").get("characters")
+    bible = read_json(
+        contained_project_path(project_dir, "plan/character-bible.json", must_exist=True)
+    ).get("characters")
     if not isinstance(bible, list) or any(not isinstance(character, dict) for character in bible):
         raise ValueError("character bible characters must be an array of objects")
     outputs: list[Path] = []
@@ -764,12 +769,16 @@ def _letter_project_with_summaries(
         temporary_root = Path(temporary)
         for panel in panels:
             panel_id = panel["id"]
-            source = project_dir / f"panels/clean/{panel_id}.png"
-            destination = project_dir / f"panels/{panel_id}/lettered.png"
+            source_relative = f"panels/clean/{panel_id}.png"
+            destination = contained_project_path(
+                project_dir, f"panels/{panel_id}/lettered.png"
+            )
             try:
+                source = contained_project_path(project_dir, source_relative, must_exist=True)
                 with Image.open(source) as image:
                     image.load()
                     width, height = image.size
+                source = contained_project_path(project_dir, source_relative, must_exist=True)
                 source_bytes = source.read_bytes()
             except (OSError, SyntaxError, Image.DecompressionBombError) as error:
                 raise ValueError(f"panel {panel_id} is not a readable image") from error

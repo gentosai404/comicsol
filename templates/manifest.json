@@ -1,5 +1,7 @@
 {
   "artifacts": {},
+  "blocked_from": null,
+  "blocked_reason": null,
   "capability": {
     "detected_at": null,
     "name": null,

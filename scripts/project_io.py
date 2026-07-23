@@ -1,0 +1,424 @@
+"""Shared trust-boundary helpers for Comic Sol project input and paths."""
+
+from __future__ import annotations
+
+import errno
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
+
+
+MAX_SOURCE_BYTES = 200 * 1024
+SOURCE_SUFFIXES = {".txt", ".md"}
+_DRIVE = re.compile(r"^[A-Za-z]:")
+_LOCK_RETRY_SECONDS = 0.05
+
+
+class ProjectLock:
+    """Cross-process advisory lock retained at ``.comic-sol.lock``."""
+
+    def __init__(self, project_dir: Path, timeout: float = 10.0):
+        self.project_dir = Path(project_dir)
+        self.timeout = timeout
+        self._handle: BinaryIO | None = None
+
+    def __enter__(self) -> "ProjectLock":
+        deadline = time.monotonic() + self.timeout
+        path = self.project_dir / ".comic-sol.lock"
+        try:
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            handle = path.open("r+b")
+        else:
+            handle = os.fdopen(descriptor, "r+b")
+            try:
+                handle.write(b"\0")
+                handle.flush()
+            except BaseException:
+                handle.close()
+                raise
+        self._handle = handle
+        acquired = False
+        try:
+            while True:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    # No metadata means writer crashed between create+write
+                    # or truncate+write. Try to acquire flock directly; if
+                    # we succeed, no real holder exists (stale lock).
+                    try:
+                        self._lock(handle)
+                        acquired = True
+                        break
+                    except OSError:
+                        pass  # real contention, keep waiting
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "project is locked by another process"
+                        )
+                else:
+                    try:
+                        self._lock(handle)
+                        acquired = True
+                        break
+                    except OSError as error:
+                        if not self._retryable(error):
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(
+                                "project is locked by another process"
+                            ) from error
+                remaining = max(0.0, deadline - time.monotonic())
+                time.sleep(min(_LOCK_RETRY_SECONDS, remaining))
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"{os.getpid()}\n".encode("ascii"))
+            handle.flush()
+            return self
+        except BaseException:
+            try:
+                if acquired:
+                    try:
+                        self._unlock(handle)
+                    except BaseException:
+                        pass
+            finally:
+                handle.close()
+                self._handle = None
+            raise
+
+    @staticmethod
+    def _lock(handle: BinaryIO) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @staticmethod
+    def _retryable(error: OSError) -> bool:
+        return error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or getattr(
+            error, "winerror", None
+        ) in {33, 36}
+
+    @staticmethod
+    def _unlock(handle: BinaryIO) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            self._unlock(handle)
+        finally:
+            handle.close()
+
+
+def validate_source_bytes(source: bytes, suffix: str | None = None) -> str:
+    if not isinstance(source, bytes):
+        raise TypeError("source must be bytes")
+    if len(source) > MAX_SOURCE_BYTES:
+        raise ValueError("source must be at most 200 KiB as UTF-8 bytes")
+    if suffix is not None and suffix.lower() not in SOURCE_SUFFIXES:
+        raise ValueError("source file must use .txt or .md")
+    try:
+        return source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("source must be valid UTF-8") from error
+
+
+def contained_project_path(
+    project_dir: Path,
+    relative: str | Path,
+    *,
+    must_exist: bool = False,
+) -> Path:
+    text = os.fspath(relative).replace("\\", "/")
+    if not text or text.startswith("/") or _DRIVE.match(text) or ".." in text.split("/"):
+        raise ValueError("path must be a relative project path")
+    root = Path(project_dir).resolve(strict=True)
+    unresolved = root.joinpath(*PurePosixPath(text).parts)
+    current = unresolved
+    while current != root:
+        if current.is_symlink():
+            raise ValueError("project path must not contain symlinks")
+        current = current.parent
+    candidate = unresolved.resolve(strict=must_exist)
+    if candidate != root and root not in candidate.parents:
+        raise ValueError("path escapes the project directory")
+    return candidate
+
+
+def fsync_directory(path: Path) -> None:
+    """Persist directory metadata; Windows has no stdlib directory fsync."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def durable_atomic_write(path: Path, payload: bytes) -> None:
+    """Atomically publish bytes and durably persist file and directory metadata."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        fsync_directory(path.parent)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _find_transaction_dir(transaction_dir: Path) -> int:
+    """Return the next available numeric transaction ID."""
+    biggest = 0
+    if transaction_dir.is_dir():
+        for entry in transaction_dir.iterdir():
+            try:
+                value = int(entry.name)
+                if value > biggest:
+                    biggest = value
+            except (ValueError, OSError):
+                pass
+    return biggest + 1
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+class ProjectTransaction:
+    """Durable journal-backed all-or-nothing batch of file replacements.
+
+    Acquires ``ProjectLock`` on enter, creates a numbered transaction
+    directory under ``logs/transactions/<id>/``, writes a durable canonical
+    journal before the first replace, and either commits or rolls back on exit.
+    """
+
+    JOURNAL_SCHEMA_VERSION = "1.0"
+
+    def __init__(self, project_dir: Path, operation: str) -> None:
+        self.project_dir = Path(project_dir)
+        self.operation = operation
+        self._lock: ProjectLock | None = None
+        self._dir: Path | None = None
+        self._journal: list[dict] = []
+        self._phase: str | None = None
+        self._id: int | None = None
+
+    def __enter__(self) -> "ProjectTransaction":
+        self._lock = ProjectLock(self.project_dir).__enter__()
+        try:
+            base = self.project_dir / "logs/transactions"
+            base.mkdir(parents=True, exist_ok=True)
+            self._id = _find_transaction_dir(base)
+            self._dir = base / str(self._id)
+            self._dir.mkdir(parents=True)
+            self._phase = "staging"
+            return self
+        except BaseException:
+            self._lock.__exit__(*sys.exc_info())
+            raise
+
+    def stage_bytes(self, relative: str, payload: bytes) -> None:
+        """Back up old destination (if any) and store staged payload under the
+        transaction directory, recording an entry in the in-memory journal."""
+        if self._dir is None:
+            raise RuntimeError("transaction not started")
+        path = Path(relative)
+        if path.is_absolute():
+            raise ValueError("stage_bytes requires a relative path")
+        # Reject traversal and non-project-relative paths
+        resolved = contained_project_path(self.project_dir, relative)
+        if resolved.resolve() == self.project_dir.resolve():
+            raise ValueError(f"path '{relative}' resolves to the project root")
+        dest = self.project_dir / path
+        index = len(self._journal) + 1
+        backup_name = f"backup-{index:03d}-{path.name}"
+        staged_name = f"staged-{index:03d}-{path.name}"
+        backup_path = self._dir / backup_name
+        staged_path = self._dir / staged_name
+        if dest.is_file():
+            durable_atomic_write(backup_path, dest.read_bytes())
+        durable_atomic_write(staged_path, payload)
+        entry = {
+            "path": relative,
+            "backup": (
+                f"logs/transactions/{self._id}/{backup_name}"
+                if dest.is_file() else None
+            ),
+            "staged": f"logs/transactions/{self._id}/{staged_name}",
+        }
+        self._journal.append(entry)
+
+    def commit(self) -> None:
+        """Durably write the canonical journal, then atomically replace each
+        target. On any replace failure, restore backups in reverse order."""
+        if self._dir is None:
+            raise RuntimeError("transaction not started")
+        if self._phase != "staging":
+            raise RuntimeError("transaction already committed or rolling back")
+        self._phase = "publishing"
+        self._write_journal()
+        staging_paths: list[tuple[Path, bool]] = []
+        try:
+            for index, entry in enumerate(self._journal, start=1):
+                dest = contained_project_path(self.project_dir, entry["path"])
+                staged = contained_project_path(
+                    self.project_dir, entry["staged"], must_exist=True
+                )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged, dest)
+                fsync_directory(dest.parent)
+                staging_paths.append((dest, True))
+            self._phase = "committed"
+            self._write_journal()
+            self._cleanup()
+        except BaseException:
+            for dest, _ in reversed(staging_paths):
+                for entry in self._journal:
+                    if entry["path"] == str(Path(dest).relative_to(self.project_dir)):
+                        if entry.get("backup"):
+                            backup = contained_project_path(self.project_dir, entry["backup"])
+                            if backup.is_file():
+                                os.replace(backup, dest)
+                                fsync_directory(dest.parent)
+                        else:
+                            try:
+                                dest.unlink()
+                            except OSError:
+                                pass
+                        break
+            self._phase = "rolled_back"
+            self._write_journal()
+            raise
+
+    def _write_journal(self) -> None:
+        if self._dir is None:
+            return
+        journal = {
+            "schema_version": self.JOURNAL_SCHEMA_VERSION,
+            "operation": self.operation,
+            "phase": self._phase,
+            "targets": self._journal,
+        }
+        durable_atomic_write(self._dir / "journal.json", _canonical_json_bytes(journal))
+
+    def _cleanup(self) -> None:
+        if self._dir is None or not self._dir.is_dir():
+            return
+        for child in self._dir.iterdir():
+            try:
+                child.unlink()
+            except OSError:
+                pass
+        parent = self._dir.parent
+        try:
+            self._dir.rmdir()
+        except OSError:
+            pass
+        fsync_directory(parent)
+        self._dir = None
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        try:
+            if exc_type is None and self._phase == "staging":
+                self.commit()
+            elif exc_type is not None and self._phase in ("staging", "publishing"):
+                self._phase = "rolled_back"
+                self._write_journal()
+            if self._phase in ("committed", "rolled_back"):
+                self._cleanup()
+        finally:
+            lock = self._lock
+            self._lock = None
+            if lock is not None:
+                lock.__exit__(exc_type, exc, traceback)
+
+    @staticmethod
+    def recover(project_dir: Path) -> None:
+        """Roll back incomplete journals while holding the project lock."""
+        project_dir = Path(project_dir)
+        base = project_dir / "logs/transactions"
+        if not base.is_dir():
+            return
+        with ProjectLock(project_dir):
+            ids: list[int] = []
+            for entry in base.iterdir():
+                try:
+                    ids.append(int(entry.name))
+                except (ValueError, OSError):
+                    continue
+            for tid in sorted(ids):
+                tx_dir = base / str(tid)
+                journal_path = tx_dir / "journal.json"
+                if not journal_path.is_file():
+                    continue
+                try:
+                    journal = json.loads(journal_path.read_text("utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                phase = journal.get("phase")
+                targets = journal.get("targets")
+                if not isinstance(targets, list):
+                    continue
+                if phase in ("staging", "publishing", "rolled_back"):
+                    for entry in reversed(targets):
+                        dest = contained_project_path(project_dir, entry["path"])
+                        backup_path = entry.get("backup")
+                        if backup_path:
+                            backup = contained_project_path(project_dir, backup_path)
+                            if backup.is_file():
+                                os.replace(backup, dest)
+                                fsync_directory(dest.parent)
+                        else:
+                            try:
+                                dest.unlink()
+                                fsync_directory(dest.parent)
+                            except OSError:
+                                pass
+                for child in tx_dir.iterdir():
+                    try:
+                        child.unlink()
+                    except OSError:
+                        pass
+                try:
+                    tx_dir.rmdir()
+                except OSError:
+                    pass
+                fsync_directory(base)

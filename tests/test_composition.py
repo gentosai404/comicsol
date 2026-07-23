@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -92,6 +93,56 @@ class CompositionTests(unittest.TestCase):
             compose_page(self.project, 1, self.storyboard, self.settings, {})
         self.assertFalse(output.exists())
 
+    def test_absolute_manifest_panel_path_is_rejected(self):
+        outside = Path(self.temporary_directory.name).parent / "outside-panel.png"
+        Image.new("RGB", (800, 800), "blue").save(outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+        artifacts = {"p01-01": {"path": str(outside)}}
+
+        with self.assertRaisesRegex(ValueError, "relative project path"):
+            compose_page(self.project, 1, self.storyboard, self.settings, artifacts)
+
+    def test_symlink_manifest_panel_path_is_rejected(self):
+        outside = Path(self.temporary_directory.name).parent / "outside-linked-panel.png"
+        Image.new("RGB", (800, 800), "blue").save(outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+        link = self.project / "panels/linked.png"
+        try:
+            link.symlink_to(outside)
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+
+        with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+            compose_page(
+                self.project, 1, self.storyboard, self.settings,
+                {"p01-01": {"path": "panels/linked.png"}},
+            )
+
+    def test_symlink_swap_after_preflight_is_rejected_before_image_open(self):
+        outside = Path(self.temporary_directory.name).parent / "outside-swapped-panel.png"
+        Image.new("RGB", (800, 800), "blue").save(outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+        source = self.project / "panels/p01-01/lettered.png"
+
+        from compose_pages import _page_sources
+
+        def swap_after_preflight(*args, **kwargs):
+            sources = _page_sources(*args, **kwargs)
+            source.unlink()
+            source.symlink_to(outside)
+            return sources
+
+        try:
+            probe = self.project / "symlink-probe"
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+
+        with patch("compose_pages._page_sources", side_effect=swap_after_preflight):
+            with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+                compose_page(self.project, 1, self.storyboard, self.settings, {})
+
     def test_repeated_composition_has_identical_bytes(self):
         path = compose_page(self.project, 1, self.storyboard, self.settings, {})
         first = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -118,6 +169,44 @@ class CompositionTests(unittest.TestCase):
 
         self.assertEqual(["page-001.png", "page-002.png"], [path.name for path in paths])
         self.assertTrue(all(path.is_file() for path in paths))
+
+    def test_failed_second_page_preserves_entire_prior_page_set(self):
+        # Setup two pages
+        second = {
+            "number": 2, "layout": "full-page",
+            "panels": [{"id": "p02-01", "rect": {"x": 64, "y": 64, "width": 1472, "height": 2272}}],
+        }
+        self.storyboard["pages"].append(second)
+        self.settings["page_count"] = 2
+        (self.project / "panels/p02-01").mkdir(parents=True)
+        Image.new("RGB", (512, 768), "blue").save(self.project / "panels/p02-01/lettered.png")
+        atomic_write_json(self.project / "plan/storyboard.json", self.storyboard)
+        manifest = json.loads((self.project / "project.json").read_text("utf-8"))
+        manifest["settings"] = self.settings
+        atomic_write_json(self.project / "project.json", manifest)
+
+        page_one = self.project / "pages/page-001.png"
+        compose_all_pages(self.project)
+        self.assertTrue(page_one.is_file())
+        old_page_one_hash = hashlib.sha256(page_one.read_bytes()).hexdigest()
+
+        # Corrupt page 2 source
+        (self.project / "panels/p02-01/lettered.png").write_text("not an image", "utf-8")
+
+        with self.assertRaises(ValueError):
+            compose_all_pages(self.project)
+
+        # Page 1 must be unchanged
+        self.assertTrue(page_one.is_file())
+        self.assertEqual(
+            old_page_one_hash,
+            hashlib.sha256(page_one.read_bytes()).hexdigest(),
+        )
+        # No stale staging left behind
+        tx_base = self.project / "logs/transactions"
+        if tx_base.is_dir():
+            entries = list(tx_base.iterdir())
+            self.assertEqual(0, len(entries))
 
 
 if __name__ == "__main__":

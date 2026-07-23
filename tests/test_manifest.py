@@ -29,6 +29,7 @@ from comic_sol import (  # noqa: E402
     slugify,
     transition,
 )
+from project_io import ProjectTransaction
 import comic_sol  # noqa: E402
 import letter_panels  # noqa: E402
 
@@ -141,7 +142,12 @@ class ManifestTests(unittest.TestCase):
             "EXPORTED",
         ):
             transition(export_project, state)
-        terminal = transition(export_project, "COMPLETE_WITH_WARNINGS", "minor prop drift")
+        # This test isolates transition-graph behavior; final artifact gating is
+        # covered by GuardedOperationTests.
+        with mock.patch("validate_project.require_valid_project"):
+            terminal = transition(
+                export_project, "COMPLETE_WITH_WARNINGS", "minor prop drift"
+            )
         self.assertEqual("COMPLETE_WITH_WARNINGS", terminal["status"])
         self.assertIn("minor prop drift", terminal["warnings"])
 
@@ -180,8 +186,9 @@ class ManifestTests(unittest.TestCase):
             {"mode": "short_prompt", "language": "en"},
         )
         before = (project / "project.json").read_bytes()
+        # Mock transaction commit to simulate event write failure
         with mock.patch.object(
-            comic_sol, "append_event", side_effect=OSError("event write failed")
+            ProjectTransaction, "commit", side_effect=OSError("event write failed")
         ):
             with self.assertRaisesRegex(OSError, "event write failed"):
                 transition(project, "PLANNED")
@@ -324,6 +331,41 @@ class ManifestTests(unittest.TestCase):
             result = main(["status", os.fspath(project), "--json"])
         self.assertEqual(0, result)
         self.assertEqual("INIT", json.loads(output.getvalue())["status"])
+
+
+class SourceBoundaryTests(unittest.TestCase):
+    def test_source_over_200_kib_creates_no_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "at most 200 KiB"):
+                init_project(root, "Too Large", b"a" * (200 * 1024 + 1), {})
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_invalid_utf8_creates_no_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "UTF-8"):
+                init_project(root, "Bad Encoding", b"\xff", {})
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_cli_rejects_non_text_source_before_project_allocation(self):
+        for suffix in (".pdf", ".json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output_root = root / "output"
+                source = root / f"story{suffix}"
+                request = root / "request.json"
+                source.write_bytes(b"story")
+                atomic_write_json(request, {})
+
+                result = main([
+                    "init", "--output-root", os.fspath(output_root),
+                    "--title", "Bad Source", "--source", os.fspath(source),
+                    "--request-json", os.fspath(request),
+                ])
+
+                self.assertEqual(1, result)
+                self.assertFalse(output_root.exists())
 
 
 if __name__ == "__main__":

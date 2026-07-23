@@ -18,7 +18,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from comic_sol import (  # noqa: E402
     ResumeAction,
     atomic_write_json,
+    block_project,
     build_resume_plan,
+    canonical_json_bytes,
     init_project,
     invalidate_from,
     main,
@@ -27,6 +29,7 @@ from comic_sol import (  # noqa: E402
     record_generation_attempt,
     record_override,
     record_stage,
+    resume_project,
     sha256_file,
     stage_cache_key,
     transition,
@@ -322,8 +325,7 @@ class ResumeTests(unittest.TestCase):
     def test_invalidate_removes_manifest_entries_but_preserves_files(self):
         storyboard_path = self.project / "plan/storyboard.json"
         before = storyboard_path.read_bytes()
-        with patch("comic_sol.atomic_write_json", wraps=atomic_write_json) as writer:
-            removed = invalidate_from(self.project, "storyboard")
+        removed = invalidate_from(self.project, "storyboard")
         self.assertEqual(["storyboard", "qa_report", "pdf"], removed)
         self.assertEqual(before, storyboard_path.read_bytes())
         self.assertNotIn("storyboard", read_json(self.project / "project.json")["artifacts"])
@@ -331,8 +333,8 @@ class ResumeTests(unittest.TestCase):
             {"planning"},
             set(read_json(self.project / "logs/stage-cache.json")["stages"]),
         )
-        published = [Path(call.args[0]).name for call in writer.call_args_list]
-        self.assertEqual(["stage-cache.json", "project.json"], published)
+        transactions = self.project / "logs/transactions"
+        self.assertEqual([], list(transactions.iterdir()) if transactions.exists() else [])
 
     def test_attempt_is_retained_until_verified_promotion(self):
         attempt = self.project / "panels/raw/p01-01.attempt-2.png"
@@ -353,27 +355,202 @@ class ResumeTests(unittest.TestCase):
             promote_attempt(self.project, "p01-01", broken)
         self.assertEqual(before, sha256_file(destination))
 
-    def test_retry_budgets_and_transient_accounting(self):
-        for number in (2, 3):
-            attempt = self.project / f"panels/raw/p01-01.attempt-{number}.png"
-            Image.new("RGB", (512, 512), "green").save(attempt)
-            record_generation_attempt(self.project, "p01-01", "visual_retry", attempt)
-        extra = self.project / "panels/raw/p01-01.attempt-4.png"
-        Image.new("RGB", (512, 512), "red").save(extra)
-        with self.assertRaisesRegex(ValueError, "two visual retries"):
-            record_generation_attempt(self.project, "p01-01", "visual_retry", extra)
+    def test_promotion_rechecks_original_relative_path_before_verification(self):
+        attempt = self.project / "panels/raw/p01-01.swap-before-verify.png"
+        outside = self.root / "outside-valid.png"
+        Image.new("RGB", (640, 960), "green").save(attempt)
+        Image.new("RGB", (640, 960), "red").save(outside)
+        real_resolver = __import__("comic_sol")._contained_project_path
+        calls = 0
 
-        project = init_project(self.root, "Budget", b"Story", {"mode": "short_prompt", "language": "en"})
-        for number in range(8):
-            attempt = project / f"panels/raw/p01-01.transient-{number + 1}.png"
-            Image.new("RGB", (512, 512), "blue").save(attempt)
-            counts = record_generation_attempt(project, "p01-01", "transient_repeat", attempt)
+        def swap_after_preflight(project_dir, path):
+            nonlocal calls
+            result = real_resolver(project_dir, path)
+            if Path(path) == attempt and calls == 0:
+                calls += 1
+                attempt.unlink()
+                attempt.symlink_to(outside)
+            return result
+
+        try:
+            probe = self.project / "symlink-probe"
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+        with patch("comic_sol._contained_project_path", side_effect=swap_after_preflight):
+            with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+                promote_attempt(self.project, "p01-01", attempt)
+
+    def test_promotion_rechecks_original_relative_path_before_read(self):
+        attempt = self.project / "panels/raw/p01-01.swap-before-read.png"
+        outside = self.root / "outside-valid.png"
+        Image.new("RGB", (640, 960), "green").save(attempt)
+        Image.new("RGB", (640, 960), "red").save(outside)
+        from comic_sol import _verify_raster
+
+        def verify_then_swap(path):
+            result = _verify_raster(path)
+            attempt.unlink()
+            attempt.symlink_to(outside)
+            return result
+
+        try:
+            probe = self.project / "symlink-probe"
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+        with patch("comic_sol._verify_raster", side_effect=verify_then_swap):
+            with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+                promote_attempt(self.project, "p01-01", attempt)
+
+    def test_cli_attempt_path_rejection_matches_shared_semantics(self):
+        for command in ("record-attempt", "promote-attempt"):
+            arguments = [command, os.fspath(self.project), "p01-01"]
+            if command == "record-attempt":
+                arguments.append("initial")
+            arguments.append("C:outside.png")
+            with self.subTest(command=command), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(arguments))
+
+    def _generation_state(self, project=None):
+        project = project or self.project
+        return tuple(
+            path.read_bytes() if path.exists() else None
+            for path in (
+                project / "logs/generation-counters.json",
+                project / "logs/events.jsonl",
+            )
+        )
+
+    def _attempt(self, name, size=(512, 512), project=None):
+        project = project or self.project
+        path = project / f"panels/raw/{name}.png"
+        Image.new("RGB", size, "green").save(path)
+        return path
+
+    def _assert_attempt_rejected_without_mutation(
+        self, panel_id, kind, attempt, message, project=None
+    ):
+        project = project or self.project
+        before = self._generation_state(project)
+        with self.assertRaisesRegex(ValueError, message):
+            record_generation_attempt(project, panel_id, kind, attempt)
+        self.assertEqual(before, self._generation_state(project))
+
+    def test_second_initial_is_rejected_without_mutation(self):
+        first = self._attempt("p01-01.initial-1")
+        counts = record_generation_attempt(self.project, "p01-01", "initial", first)
+        self.assertEqual(1, counts["initial"])
+        self.assertEqual(0, counts["global_extra_calls"])
+        second = self._attempt("p01-01.initial-2")
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01", "initial", second, "one initial attempt"
+        )
+
+    def test_second_transient_repeat_is_rejected_without_mutation(self):
+        first = self._attempt("p01-01.transient-1")
+        counts = record_generation_attempt(
+            self.project, "p01-01", "transient_repeat", first
+        )
+        self.assertEqual(1, counts["transient_repeats"])
+        self.assertEqual(1, counts["global_extra_calls"])
+        second = self._attempt("p01-01.transient-2")
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01", "transient_repeat", second, "one transient repeat"
+        )
+
+    def test_third_visual_retry_is_rejected_without_mutation(self):
+        for number in (1, 2):
+            counts = record_generation_attempt(
+                self.project,
+                "p01-01",
+                "visual_retry",
+                self._attempt(f"p01-01.visual-{number}"),
+            )
+        self.assertEqual(2, counts["visual_retries"])
+        self.assertEqual(2, counts["global_extra_calls"])
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01",
+            "visual_retry",
+            self._attempt("p01-01.visual-3"),
+            "two visual retries",
+        )
+
+    def test_corrupt_raster_is_rejected_without_mutation(self):
+        attempt = self.project / "panels/raw/p01-01.corrupt.png"
+        attempt.write_bytes(b"not an image")
+        self._assert_attempt_rejected_without_mutation(
+            "p01-01", "initial", attempt, "readable raster"
+        )
+
+    def test_small_raster_is_rejected_without_mutation(self):
+        for size in ((511, 512), (512, 511)):
+            with self.subTest(size=size):
+                self._assert_attempt_rejected_without_mutation(
+                    "p01-01",
+                    "initial",
+                    self._attempt(f"p01-01.small-{size[0]}x{size[1]}", size),
+                    "at least 512px",
+                )
+
+    def test_ninth_global_extra_is_rejected_and_initials_are_excluded(self):
+        project = init_project(
+            self.root,
+            "Budget",
+            b"Story",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        for number in range(1, 9):
+            panel_id = f"p{number:02d}-01"
+            counts = record_generation_attempt(
+                project,
+                panel_id,
+                "initial",
+                self._attempt(f"{panel_id}.initial", project=project),
+            )
+        self.assertEqual(0, counts["global_extra_calls"])
+        for number in (1, 2):
+            counts = record_generation_attempt(
+                project,
+                "p01-01",
+                "visual_retry",
+                self._attempt(f"p01-01.visual-{number}", project=project),
+            )
+        for number in range(2, 8):
+            panel_id = f"p{number:02d}-01"
+            counts = record_generation_attempt(
+                project,
+                panel_id,
+                "transient_repeat",
+                self._attempt(f"{panel_id}.transient", project=project),
+            )
         self.assertEqual(8, counts["global_extra_calls"])
-        self.assertEqual(0, counts["visual_retries"])
-        ninth = project / "panels/raw/p01-01.transient-9.png"
-        Image.new("RGB", (512, 512), "blue").save(ninth)
-        with self.assertRaisesRegex(ValueError, "eight extra calls"):
-            record_generation_attempt(project, "p01-01", "transient_repeat", ninth)
+        self.assertEqual(1, counts["transient_repeats"])
+        self._assert_attempt_rejected_without_mutation(
+            "p08-01",
+            "transient_repeat",
+            self._attempt("p08-01.transient", project=project),
+            "eight extra calls",
+            project,
+        )
+
+    def test_successful_attempt_appends_sanitized_event(self):
+        attempt = self._attempt("p01-01.initial")
+        record_generation_attempt(self.project, "p01-01", "initial", attempt)
+        event = json.loads(
+            (self.project / "logs/events.jsonl").read_text("utf-8").splitlines()[-1]
+        )
+        self.assertEqual("generation.attempt-recorded", event["event"])
+        self.assertEqual(
+            {
+                "attempt_path": "panels/raw/p01-01.initial.png",
+                "kind": "initial",
+                "panel_id": "p01-01",
+            },
+            event["details"],
+        )
 
     def _failing_panel_record(self, category):
         check_ids = (
@@ -517,7 +694,10 @@ class ResumeTests(unittest.TestCase):
         for status in ("LETTERED", "COMPOSED", "EXPORTED"):
             transition(self.project, status)
 
-        completed = transition(self.project, "COMPLETE")
+        # This test isolates warning-target selection; final artifact gating is
+        # covered by GuardedOperationTests.
+        with patch("validate_project.require_valid_project"):
+            completed = transition(self.project, "COMPLETE")
         self.assertEqual("COMPLETE_WITH_WARNINGS", completed["status"])
 
     def test_resume_plan_without_cache_marks_every_stage_stale(self):
@@ -561,10 +741,7 @@ class ResumeTests(unittest.TestCase):
         cache = read_json(cache_path)
         self.assertEqual({"schema_version", "stages"}, set(cache))
         self.assertEqual({"planning"}, set(cache["stages"]))
-        self.assertEqual(
-            (json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-            cache_path.read_bytes(),
-        )
+        self.assertEqual(canonical_json_bytes(cache), cache_path.read_bytes())
         self.assertEqual([], list(cache_path.parent.glob(f".{cache_path.name}.*.tmp")))
 
     def test_record_stage_refuses_missing_expected_output(self):
@@ -779,6 +956,201 @@ class ResumeFixtureIntegrationTests(unittest.TestCase):
             panel_actions = {a.artifact: a.action for a in actions if a.artifact.startswith("p")}
             self.assertEqual("regenerate", panel_actions["p01-01"])
             self.assertEqual("regenerate", panel_actions["p01-02"])
+
+
+class BlockedRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.project = init_project(
+            self.root,
+            "Sunlight Courier",
+            b"A courier carries the last light.",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        story = {
+            "schema_version": "1.0", "title": "Sunlight Courier",
+            "scenes": [{"id": "hall", "characters": ["mira"]}],
+        }
+        characters = {
+            "schema_version": "1.0",
+            "characters": [{
+                "id": "mira",
+                "visual_fingerprint": {"invariants": ["amber scarf", "round clasp"]},
+                "reference_path": "references/characters/mira.png",
+            }],
+        }
+        storyboard = {
+            "schema_version": "1.0",
+            "pages": [{
+                "number": 1, "layout": "full-page",
+                "panels": [{
+                    "id": "p01-01", "scene_id": "hall", "characters": ["mira"],
+                    "rect": {"x": 64, "y": 64, "width": 1472, "height": 2272},
+                    "text": [{"id": "p01-01-t01", "content": "One last delivery."}],
+                }],
+            }],
+        }
+        atomic_write_json(self.project / "plan/story-plan.json", story)
+        atomic_write_json(self.project / "plan/character-bible.json", characters)
+        atomic_write_json(self.project / "plan/storyboard.json", storyboard)
+        (self.project / "prompts/panels/p01-01.txt").write_text("panel prompt\n", "utf-8")
+        (self.project / "panels/p01-01").mkdir(exist_ok=True)
+        for relative, color in (
+            ("references/characters/mira.png", "orange"),
+            ("panels/raw/p01-01.png", "navy"),
+            ("panels/clean/p01-01.png", "blue"),
+            ("panels/p01-01/lettered.png", "white"),
+            ("pages/page-001.png", "gray"),
+        ):
+            Image.new("RGB", (512, 512), color).save(self.project / relative)
+        self._write_json("qa/panels/p01-01.json", {
+            "schema_version": "1.0",
+            "panel_id": "p01-01",
+            "source_prompt_path": "prompts/panels/p01-01.txt",
+            "raw_path": "panels/raw/p01-01.png",
+            "clean_path": "panels/clean/p01-01.png",
+            "raw_sha256": sha256_file(self.project / "panels/raw/p01-01.png"),
+            "dimensions": {"height": 512, "width": 512},
+            "attempts": 1,
+            "generation": {
+                "capability_name": "test-image",
+                "completed_at": "2026-07-20T00:00:00Z",
+                "reference_paths": ["references/characters/mira.png"],
+            },
+            "checks": [
+                {"id": cid, "result": "pass", "severity": "error", "evidence": "ok"}
+                for cid in ("character-identity", "anatomy", "action", "composition",
+                             "continuity", "text-free", "technical")
+            ],
+            "decision": "accept",
+            "retry_reason": None,
+            "unresolved_warnings": [],
+        })
+        (self.project / "qa/report.md").write_text("# QA\n", "utf-8")
+        (self.project / "exports/sunlight-courier.pdf").write_bytes(b"%PDF-1.4\nfixture\n")
+
+        manifest = read_json(self.project / "project.json")
+        manifest.update({
+            "status": "STORYBOARDED",
+            "panels": ["p01-01"],
+            "artifacts": {
+                "story_plan": {"path": "plan/story-plan.json",
+                                "sha256": sha256_file(self.project / "plan/story-plan.json")},
+                "character_bible": {"path": "plan/character-bible.json",
+                                    "sha256": sha256_file(self.project / "plan/character-bible.json")},
+                "storyboard": {"path": "plan/storyboard.json",
+                               "sha256": sha256_file(self.project / "plan/storyboard.json")},
+            },
+        })
+        manifest["settings"].update({"page_count": 1, "panel_count": 1})
+        manifest["warnings"] = ["unrelated continuity warning"]
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:00:00Z",
+            "name": None,
+            "status": "unavailable",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        cache = {"schema_version": "1.0", "stages": {}}
+        from comic_sol import _resume_stage_material
+        for stage in ("planning", "storyboard"):
+            canonical_inputs, files = _resume_stage_material(self.project, stage, manifest)
+            outputs = {"planning": ["plan/story-plan.json", "plan/character-bible.json"],
+                        "storyboard": ["plan/storyboard.json"]}[stage]
+            cache["stages"][stage] = {
+                "key": stage_cache_key(stage, canonical_inputs, files, manifest["stage_versions"][stage]),
+                "artifacts": {r: sha256_file(self.project / r) for r in outputs},
+            }
+        atomic_write_json(self.project / "logs/stage-cache.json", cache)
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def _write_json(self, relative, data):
+        path = self.project / relative
+        atomic_write_json(path, data)
+        return path
+
+
+    def test_blocked_project_resumes_without_losing_valid_artifacts(self):
+        warning = "image capability unavailable"
+        before = {
+            relative: (self.project / relative).read_bytes()
+            for relative in (
+                "plan/story-plan.json",
+                "plan/character-bible.json",
+                "plan/storyboard.json",
+            )
+        }
+        blocked = block_project(
+            self.project, "image-capability-unavailable", warning
+        )
+        self.assertEqual("BLOCKED", blocked["status"])
+        self.assertEqual("STORYBOARDED", blocked["blocked_from"])
+        self.assertEqual("image-capability-unavailable", blocked["blocked_reason"])
+
+        manifest = read_json(self.project / "project.json")
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:01:00Z",
+            "name": "restored-image-tool",
+            "status": "available",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        result = resume_project(self.project)
+
+        self.assertEqual("STORYBOARDED", result["status"])
+        self.assertEqual(["planning", "storyboard"], result["preserved"])
+        self.assertEqual(["generation", "lettering", "composition", "export"], result["invalidated"])
+        self.assertEqual({"agent_required": "generation"}, result["next_action"])
+        resumed = read_json(self.project / "project.json")
+        self.assertIsNone(resumed["blocked_from"])
+        self.assertIsNone(resumed["blocked_reason"])
+        self.assertEqual(["unrelated continuity warning"], resumed["warnings"])
+        for relative, payload in before.items():
+            self.assertEqual(payload, (self.project / relative).read_bytes())
+
+    def test_resume_cli_reports_actionable_json_and_human_output(self):
+        block_project(
+            self.project,
+            "image-capability-unavailable",
+            "image capability unavailable",
+        )
+        manifest = read_json(self.project / "project.json")
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:01:00Z",
+            "name": "restored-image-tool",
+            "status": "available",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, main(["resume", os.fspath(self.project), "--json"]))
+        self.assertEqual(
+            {"agent_required": "generation"},
+            json.loads(output.getvalue())["next_action"],
+        )
+
+    def test_resume_cli_human_output(self):
+        block_project(
+            self.project,
+            "image-capability-unavailable",
+            "image capability unavailable",
+        )
+        manifest = read_json(self.project / "project.json")
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:01:00Z",
+            "name": "restored-image-tool",
+            "status": "available",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, main(["resume", os.fspath(self.project)]))
+        self.assertIn("agent required: generation", output.getvalue())
 
 
 if __name__ == "__main__":

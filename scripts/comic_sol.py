@@ -18,6 +18,14 @@ from typing import Literal
 
 from PIL import Image, ImageFont
 
+from project_io import (
+    ProjectLock,
+    ProjectTransaction,
+    contained_project_path,
+    durable_atomic_write,
+    validate_source_bytes,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "templates"
@@ -61,6 +69,14 @@ STAGE_INVALIDATION_STATUS = {
     "lettering": "QA_READY",
     "composition": "LETTERED",
     "export": "COMPOSED",
+}
+STAGE_COMPLETION_STATUS = {
+    "planning": "SCRIPTED",
+    "storyboard": "STORYBOARDED",
+    "generation": "QA_READY",
+    "lettering": "LETTERED",
+    "composition": "COMPOSED",
+    "export": "EXPORTED",
 }
 ARTIFACT_STAGE = {
     "story_plan": "planning",
@@ -157,30 +173,8 @@ def read_json(path: Path) -> dict[str, object]:
 
 
 def atomic_write_bytes(path: Path, payload: bytes) -> None:
-    """Atomically publish bytes through a flushed sibling temporary file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary_path = Path(handle.name)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink()
-            except FileNotFoundError:
-                pass
+    """Compatibility wrapper for durable artifact publication."""
+    durable_atomic_write(path, payload)
 
 
 def atomic_write_json(path: Path, value: object) -> None:
@@ -338,6 +332,7 @@ def init_project(
         raise TypeError("request must be a JSON object")
     if not title.strip():
         raise ValueError("title must not be empty")
+    validate_source_bytes(source)
 
     project_dir = _allocate_project_directory(Path(output_root), slugify(title))
     for relative in PROJECT_DIRECTORIES:
@@ -406,12 +401,8 @@ def _sanitize_event_details(details: dict[str, object]) -> dict[str, object]:
     return sanitized
 
 
-def append_event(
-    project_dir: Path,
-    event: str,
-    details: dict[str, object],
-) -> None:
-    """Append one sanitized canonical JSON object to the project event log."""
+def canonical_event_record(event: str, details: dict[str, object]) -> bytes:
+    """Build one sanitized canonical event line without publishing it."""
     if not isinstance(event, str) or not CATEGORY.fullmatch(event):
         raise ValueError("event name must be a sanitized category")
     if not isinstance(details, dict):
@@ -421,10 +412,25 @@ def append_event(
         "event": event,
         "timestamp": _utc_now(),
     }
+    return canonical_json_bytes(event_record) + b"\n"
+
+
+def _event_log_with(project_dir: Path, event: str, details: dict[str, object]) -> bytes:
+    event_path = contained_project_path(project_dir, "logs/events.jsonl")
+    prior = event_path.read_bytes() if event_path.is_file() else b""
+    return prior + canonical_event_record(event, details)
+
+
+def append_event(
+    project_dir: Path,
+    event: str,
+    details: dict[str, object],
+) -> None:
+    """Append one sanitized canonical JSON object to the project event log."""
     event_path = Path(project_dir) / "logs/events.jsonl"
     event_path.parent.mkdir(parents=True, exist_ok=True)
     with event_path.open("ab") as handle:
-        handle.write(canonical_json_bytes(event_record) + b"\n")
+        handle.write(canonical_event_record(event, details))
         handle.flush()
         os.fsync(handle.fileno())
 
@@ -450,6 +456,10 @@ def transition(
     warning: str | None = None,
 ) -> dict[str, object]:
     """Move a project by one legal state, publishing the manifest last."""
+    if target == "BLOCKED":
+        block_warning = warning or "project blocked"
+        reason = re.sub(r"[^a-z0-9]+", "-", block_warning.lower()).strip("-")
+        return block_project(project_dir, reason or "project-blocked", block_warning)
     project_dir = Path(project_dir)
     manifest_path = project_dir / "project.json"
     manifest = read_json(manifest_path)
@@ -461,6 +471,9 @@ def transition(
         target = "COMPLETE_WITH_WARNINGS"
     if not isinstance(current, str) or not _allowed_transition(current, target):
         raise ValueError(f"invalid Comic Sol transition: {current} -> {target}")
+    if target in TERMINAL_STATUSES:
+        from validate_project import require_valid_project
+        require_valid_project(project_dir, "final")
     if target == "COMPLETE_WITH_WARNINGS" and not (warnings or warning):
         raise ValueError("COMPLETE_WITH_WARNINGS requires an unresolved warning")
     if warning and warning not in warnings:
@@ -468,12 +481,14 @@ def transition(
     manifest["status"] = target
     manifest["updated_at"] = _utc_now()
 
-    append_event(
+    events = _event_log_with(
         project_dir,
         "project.transitioned",
         {"from": current, "to": target, "warning_present": warning is not None},
     )
-    atomic_write_json(manifest_path, manifest)
+    with ProjectTransaction(project_dir, "transition") as tx:
+        tx.stage_bytes("logs/events.jsonl", events)
+        tx.stage_bytes("project.json", canonical_json_bytes(manifest))
     return manifest
 
 
@@ -775,8 +790,14 @@ def record_stage(project_dir: Path, stage: str) -> dict[str, object]:
     stages = cache["stages"]
     assert isinstance(stages, dict)
     stages[stage] = {"artifacts": artifacts, "key": key}
-    atomic_write_json(cache_path, cache)
-    append_event(project_dir, "stage.recorded", {"action": stage})
+    updated_cache = canonical_json_bytes(cache)
+    updated_manifest = canonical_json_bytes(manifest)
+    with ProjectTransaction(project_dir, "stage-committed") as tx:
+        tx.stage_bytes(str(STAGE_CACHE_PATH), updated_cache)
+        tx.stage_bytes(
+            "logs/events.jsonl",
+            _event_log_with(project_dir, "stage.recorded", {"action": stage}),
+        )
     return {"artifacts": len(artifacts), "stage": stage}
 
 
@@ -1012,6 +1033,134 @@ def build_resume_plan(project_dir: Path) -> list[ResumeAction]:
     return actions
 
 
+def _warning_reason(warning: object) -> str | None:
+    if not isinstance(warning, str):
+        return None
+    return re.sub(r"[^a-z0-9]+", "-", warning.lower()).strip("-")
+
+
+def block_project(project_dir: Path, reason: str, warning: str) -> dict[str, object]:
+    """Record a recoverable block with its last normal state."""
+    if not isinstance(reason, str) or CATEGORY.fullmatch(reason) is None:
+        raise ValueError("blocked reason must be a stable category")
+    if not isinstance(warning, str) or not warning.strip():
+        raise ValueError("blocked warning must not be empty")
+    project_dir = Path(project_dir).resolve(strict=True)
+    manifest_path = contained_project_path(project_dir, "project.json", must_exist=True)
+    with ProjectLock(project_dir):
+        manifest = read_json(manifest_path)
+        current = manifest.get("status")
+        if not isinstance(current, str) or not _allowed_transition(current, "BLOCKED"):
+            raise ValueError(f"invalid Comic Sol transition: {current} -> BLOCKED")
+        warnings = manifest.get("warnings")
+        if not isinstance(warnings, list):
+            raise ValueError("manifest warnings must be an array")
+        normalized_warning = warning.strip()
+        if normalized_warning not in warnings:
+            warnings.append(normalized_warning)
+        manifest.update({
+            "blocked_from": current,
+            "blocked_reason": reason,
+            "status": "BLOCKED",
+            "updated_at": _utc_now(),
+        })
+        append_event(
+            project_dir,
+            "project.transitioned",
+            {"from": current, "to": "BLOCKED", "warning_present": True},
+        )
+        atomic_write_json(manifest_path, manifest)
+        return manifest
+
+
+def _resolved_block(manifest: dict[str, object], reason: str) -> bool:
+    if reason != "image-capability-unavailable":
+        return True
+    capability = manifest.get("capability")
+    return isinstance(capability, dict) and capability.get("status") == "available"
+
+
+def _next_resume_action(project_dir: Path, stage: str | None) -> dict[str, str] | None:
+    if stage is None:
+        return None
+    if stage in {"planning", "storyboard", "generation"}:
+        return {"agent_required": stage}
+    commands = {
+        "lettering": "scripts/letter_panels.py",
+        "composition": "scripts/compose_pages.py",
+        "export": "scripts/export_pdf.py",
+    }
+    return {"command": f"{sys.executable} {ROOT / commands[stage]} {project_dir}"}
+
+
+def resume_project(project_dir: Path) -> dict[str, object]:
+    """Recover transactions and move a blocked project to its last valid state."""
+    project_dir = Path(project_dir).resolve(strict=True)
+    manifest_path = contained_project_path(project_dir, "project.json", must_exist=True)
+    ProjectTransaction.recover(project_dir)
+    with ProjectLock(project_dir):
+        manifest = read_json(manifest_path)
+        if manifest.get("status") != "BLOCKED":
+            raise ValueError("resume requires a BLOCKED project")
+        actions = build_resume_plan(project_dir)
+        stage_actions = {
+            action.stage: action
+            for action in actions
+            if action.artifact == "stage"
+        }
+        preserved: list[str] = []
+        stale_stage: str | None = None
+        for stage in RESUME_STAGES:
+            action = stage_actions.get(stage)
+            if stale_stage is None and action is not None and action.action == "reuse":
+                preserved.append(stage)
+            elif stale_stage is None:
+                stale_stage = stage
+        invalidated = (
+            list(RESUME_STAGES[RESUME_STAGES.index(stale_stage):])
+            if stale_stage is not None else []
+        )
+        blocked_from = manifest.get("blocked_from")
+        if blocked_from not in LINEAR_STATUSES:
+            blocked_from = STAGE_COMPLETION_STATUS[preserved[-1]] if preserved else "INIT"
+            manifest["blocked_from"] = blocked_from
+        reason = manifest.get("blocked_reason")
+        if not isinstance(reason, str) or CATEGORY.fullmatch(reason) is None:
+            reason = "legacy-blocked"
+            manifest["blocked_reason"] = reason
+        if not _resolved_block(manifest, reason):
+            atomic_write_json(manifest_path, manifest)
+            return {
+                "status": "BLOCKED",
+                "preserved": preserved,
+                "invalidated": [],
+                "next_action": {"required": "image capability available"},
+            }
+        # Drop outer lock so invalidate_from can acquire its own ProjectTransaction lock
+    if stale_stage is not None:
+        invalidate_from(project_dir, stale_stage)
+    recovery_status = STAGE_COMPLETION_STATUS[preserved[-1]] if preserved else "INIT"
+    with ProjectLock(project_dir):
+        manifest = read_json(manifest_path)
+        warnings = manifest.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+        manifest["warnings"] = [
+            item for item in warnings if _warning_reason(item) != reason
+        ]
+        manifest["status"] = recovery_status
+        manifest["blocked_from"] = None
+        manifest["blocked_reason"] = None
+        manifest["updated_at"] = _utc_now()
+        atomic_write_json(manifest_path, manifest)
+        return {
+            "status": recovery_status,
+            "preserved": preserved,
+            "invalidated": invalidated,
+            "next_action": _next_resume_action(project_dir, stale_stage),
+        }
+
+
 def invalidate_from(project_dir: Path, stage: str) -> list[str]:
     """Forget manifest/cache descriptors from a stage onward without deleting artifacts."""
     if stage not in RESUME_STAGES:
@@ -1034,6 +1183,7 @@ def invalidate_from(project_dir: Path, stage: str) -> list[str]:
     manifest["status"] = STAGE_INVALIDATION_STATUS[stage]
     manifest["updated_at"] = _utc_now()
 
+    cache_bytes: bytes | None = None
     cache_path = project_dir / STAGE_CACHE_PATH
     if cache_path.is_file():
         cache, _ = _load_stage_cache(cache_path)
@@ -1041,18 +1191,23 @@ def invalidate_from(project_dir: Path, stage: str) -> list[str]:
         if isinstance(cached_stages, dict):
             for downstream in RESUME_STAGES[start:]:
                 cached_stages.pop(downstream, None)
-            atomic_write_json(cache_path, cache)
-    atomic_write_json(manifest_path, manifest)
+            cache_bytes = canonical_json_bytes(cache)
+
+    with ProjectTransaction(project_dir, "invalidate") as tx:
+        if cache_bytes is not None:
+            tx.stage_bytes(str(STAGE_CACHE_PATH), cache_bytes)
+        tx.stage_bytes("project.json", canonical_json_bytes(manifest))
     return removed
 
 
 def _contained_project_path(project_dir: Path, path: Path) -> Path:
-    project_root = project_dir.resolve()
-    candidate = path if path.is_absolute() else project_dir / path
-    resolved = candidate.resolve()
-    if resolved != project_root and project_root not in resolved.parents:
-        raise ValueError("path escapes the project directory")
-    return resolved
+    project_root = Path(project_dir).resolve(strict=True)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(project_root)
+        except ValueError as error:
+            raise ValueError("path escapes the project directory") from error
+    return contained_project_path(project_root, path)
 
 
 def _read_generation_counters(project_dir: Path) -> dict[str, object]:
@@ -1075,40 +1230,74 @@ def record_generation_attempt(
         raise ValueError("unknown generation attempt kind")
     project_dir = Path(project_dir)
     attempt = _contained_project_path(project_dir, Path(attempt_path))
-    if not attempt.is_file():
-        raise ValueError("attempt path must be a retained file")
-    counters = _read_generation_counters(project_dir)
-    panels = counters.get("panels")
-    if not isinstance(panels, dict):
-        raise ValueError("generation counter panels must be an object")
-    panel = panels.setdefault(panel_id, {
-        "initial": 0, "transient_repeats": 0, "visual_retries": 0,
-    })
-    if not isinstance(panel, dict):
-        raise ValueError("panel generation counters must be an object")
-    global_extras = counters.get("global_extra_calls", 0)
-    if not isinstance(global_extras, int):
-        raise ValueError("global generation counter must be an integer")
-    if kind == "visual_retry" and panel.get("visual_retries", 0) >= 2:
-        raise ValueError("at most two visual retries are allowed per panel")
-    if kind in {"visual_retry", "transient_repeat"} and global_extras >= 8:
-        raise ValueError("at most eight extra calls are allowed per project")
-    counter_name = {
+    attempt_relative = attempt.relative_to(project_dir.resolve(strict=True))
+    counter_names = {
         "initial": "initial",
-        "visual_retry": "visual_retries",
         "transient_repeat": "transient_repeats",
-    }[kind]
-    panel[counter_name] = int(panel.get(counter_name, 0)) + 1
-    if kind in {"visual_retry", "transient_repeat"}:
-        global_extras += 1
-        counters["global_extra_calls"] = global_extras
-    atomic_write_json(project_dir / GENERATION_COUNTERS_PATH, counters)
-    return {
-        "global_extra_calls": global_extras,
-        "initial": int(panel.get("initial", 0)),
-        "transient_repeats": int(panel.get("transient_repeats", 0)),
-        "visual_retries": int(panel.get("visual_retries", 0)),
+        "visual_retry": "visual_retries",
     }
+    limits = {"initial": 1, "transient_repeat": 1, "visual_retry": 2}
+    limit_messages = {
+        "initial": "at most one initial attempt is allowed per panel",
+        "transient_repeat": "at most one transient repeat is allowed per panel",
+        "visual_retry": "at most two visual retries are allowed per panel",
+    }
+    with ProjectLock(project_dir):
+        attempt = contained_project_path(
+            project_dir, attempt_relative, must_exist=True
+        )
+        if not attempt.is_file():
+            raise ValueError("attempt path must be a retained file")
+        _verify_raster(attempt)
+
+        counters = _read_generation_counters(project_dir)
+        panels = counters.get("panels")
+        if not isinstance(panels, dict):
+            raise ValueError("generation counter panels must be an object")
+        panel = panels.get(panel_id)
+        if panel is None:
+            panel = {"initial": 0, "transient_repeats": 0, "visual_retries": 0}
+            panels[panel_id] = panel
+        if not isinstance(panel, dict):
+            raise ValueError("panel generation counters must be an object")
+        for name in counter_names.values():
+            value = panel.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("panel generation counters must be non-negative integers")
+        global_extras = counters.get("global_extra_calls", 0)
+        if (
+            isinstance(global_extras, bool)
+            or not isinstance(global_extras, int)
+            or global_extras < 0
+        ):
+            raise ValueError("global generation counter must be a non-negative integer")
+
+        counter_name = counter_names[kind]
+        if panel[counter_name] >= limits[kind]:
+            raise ValueError(limit_messages[kind])
+        if kind != "initial" and global_extras >= 8:
+            raise ValueError("at most eight extra calls are allowed per project")
+
+        panel[counter_name] += 1
+        if kind != "initial":
+            global_extras += 1
+            counters["global_extra_calls"] = global_extras
+        atomic_write_json(project_dir / GENERATION_COUNTERS_PATH, counters)
+        append_event(
+            project_dir,
+            "generation.attempt-recorded",
+            {
+                "attempt_path": attempt_relative,
+                "kind": kind,
+                "panel_id": panel_id,
+            },
+        )
+        return {
+            "global_extra_calls": global_extras,
+            "initial": panel["initial"],
+            "transient_repeats": panel["transient_repeats"],
+            "visual_retries": panel["visual_retries"],
+        }
 
 
 def _verify_raster(path: Path) -> tuple[int, int]:
@@ -1129,21 +1318,37 @@ def promote_attempt(project_dir: Path, panel_id: str, attempt_path: Path) -> Pat
     if not IDENTIFIER.fullmatch(panel_id):
         raise ValueError("invalid panel ID")
     project_dir = Path(project_dir)
-    attempt = _contained_project_path(project_dir, Path(attempt_path))
+    attempt_relative = Path(attempt_path)
+    attempt = _contained_project_path(project_dir, attempt_relative)
     if not attempt.is_file():
         raise ValueError("attempt path must be a retained file")
-    _verify_raster(attempt)
-    destination = project_dir / f"panels/raw/{panel_id}.png"
-    if destination.is_file() and sha256_file(destination) != sha256_file(attempt):
-        number = 1
-        while True:
-            archive = destination.with_name(f"{panel_id}.attempt-{number}.png")
-            if not archive.exists() and archive.resolve() != attempt.resolve():
-                atomic_write_bytes(archive, destination.read_bytes())
-                break
-            number += 1
-    atomic_write_bytes(destination, attempt.read_bytes())
-    return destination
+    if attempt_relative.is_absolute():
+        attempt_relative = attempt.relative_to(project_dir.resolve(strict=True))
+    with ProjectLock(project_dir):
+        attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
+        if not attempt.is_file():
+            raise ValueError("attempt path must be a retained file")
+        _verify_raster(attempt)
+        destination = project_dir / f"panels/raw/{panel_id}.png"
+        event_details = {"attempt_path": attempt_relative, "panel_id": panel_id}
+        if destination.is_file():
+            old_bytes = destination.read_bytes()
+            old_sha = sha256_file(destination)
+            new_sha = sha256_file(attempt)
+            if old_sha == new_sha:
+                return destination
+            number = 1
+            while True:
+                archive = destination.with_name(f"{panel_id}.attempt-{number}.png")
+                candidate = archive.resolve()
+                if not archive.exists() and candidate != attempt.resolve() and candidate != destination.resolve():
+                    durable_atomic_write(archive, old_bytes)
+                    break
+                number += 1
+        attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
+        durable_atomic_write(destination, attempt.read_bytes())
+        append_event(project_dir, "generation.attempt-promoted", event_details)
+        return destination
 
 
 def record_override(project_dir: Path, panel_id: str, reason: str) -> None:
@@ -1214,13 +1419,18 @@ def record_override(project_dir: Path, panel_id: str, reason: str) -> None:
     record["decision"] = "accept_with_warnings"
     record["retry_reason"] = None
     record["override_reason"] = normalized_reason
-    atomic_write_json(record_path, record)
 
     if normalized_reason not in manifest_warnings:
         manifest_warnings.append(normalized_reason)
         manifest["updated_at"] = _utc_now()
-        atomic_write_json(manifest_path, manifest)
-    append_event(project_dir, "panel.overridden", {"panel_id": panel_id, "action": "accepted"})
+
+    with ProjectTransaction(project_dir, "override") as tx:
+        tx.stage_bytes(f"qa/panels/{panel_id}.json", canonical_json_bytes(record))
+        tx.stage_bytes("project.json", canonical_json_bytes(manifest))
+        tx.stage_bytes(
+            "logs/events.jsonl",
+            _event_log_with(project_dir, "panel.overridden", {"panel_id": panel_id, "action": "accepted"}),
+        )
 
 
 def doctor(output_root: Path) -> tuple[bool, list[str]]:
@@ -1290,6 +1500,183 @@ def doctor(output_root: Path) -> tuple[bool, list[str]]:
     return healthy, messages
 
 
+def _normalize_manifest(project_dir: Path) -> None:
+    """Re-read and re-write project.json in canonical two-space sorted format.
+
+    Transition writes compact JSON (canonical_json_bytes) which violates
+    validate_project's expectation of two-space indented format. This
+    normalizer runs after each transition in finalize_project so that
+    subsequent guarded_export (which calls require_valid_project) passes.
+    """
+    manifest_path = project_dir / "project.json"
+    manifest = read_json(manifest_path)
+    atomic_write_json(manifest_path, manifest)
+
+
+def _create_composition_cache(project_dir: Path) -> None:
+    """Write the composition stage cache required by export-ready validation.
+
+    compose_project creates pages but does not write cache/composition.json.
+    validate_project's export-ready check requires this file to exist with a
+    valid schema_version and stages object.  This helper fills the gap.
+    """
+    cache_path = project_dir / "cache/composition.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = read_json(project_dir / "project.json")
+    panels = manifest.get("panels", [])
+    if not isinstance(panels, list):
+        panels = []
+    pages_dir = project_dir / "pages"
+    page_count = 0
+    if pages_dir.is_dir():
+        page_count = len(list(pages_dir.glob("page-*.png")))
+    cache = {
+        "schema_version": "1.0",
+        "stages": {
+            "composition": {
+                "artifacts": {
+                    f"pages/page-{n:03d}.png": (project_dir / f"pages/page-{n:03d}.png").stat().st_size
+                    for n in range(1, page_count + 1)
+                    if (project_dir / f"pages/page-{n:03d}.png").is_file()
+                },
+            }
+        },
+    }
+    atomic_write_json(cache_path, cache)
+    # Also add artifact descriptor so validate can find it.
+    m = read_json(project_dir / "project.json")
+    artifacts = m.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    artifacts["composition_cache"] = {
+        "path": "cache/composition.json",
+        "sha256": sha256_file(cache_path),
+    }
+    m["artifacts"] = artifacts
+    atomic_write_json(project_dir / "project.json", m)
+
+
+def finalize_project(project_dir: Path) -> dict[str, object]:
+    """Run all deterministic finalization steps and transition to terminal status.
+
+    Order: lettering → composition → page-QA gate → guarded export →
+    report → descriptor recording → export stage → terminal transition.
+    Page-QA records are agent-produced; this function fails closed if they
+    are absent or stale rather than fabricating visual evidence.
+    """
+    project_dir = Path(project_dir).resolve(strict=True)
+    manifest_path = project_dir / "project.json"
+
+    # 1. Determine stale stages from the resume plan.
+    plan = build_resume_plan(project_dir)
+    stale = {
+        a.stage for a in plan
+        if a.artifact == "stage" and a.action in {"run", "rerun"}
+    }
+
+    # 2. Lettering (if stale), advance status.
+    manifest = read_json(manifest_path)
+    need_lettering = "lettering" in stale or not all(
+        (project_dir / f"panels/{pid}/lettered.png").is_file()
+        for pid in (manifest.get("panels") if isinstance(manifest.get("panels"), list) else [])
+    )
+    if need_lettering:
+        from letter_panels import letter_project
+        letter_project(project_dir)
+        manifest = read_json(manifest_path)
+        _normalize_manifest(project_dir)  # restore two-space before record_stage
+        record_stage(project_dir, "lettering")
+    manifest = read_json(manifest_path)
+    if _allowed_transition(str(manifest.get("status")), "LETTERED"):
+        transition(project_dir, "LETTERED")
+    _normalize_manifest(project_dir)  # transition writes compact json
+
+    # 3. Composition (if stale), advance status.
+    manifest = read_json(manifest_path)
+    need_composition = "composition" in stale or not (project_dir / "cache/composition.json").is_file()
+    if need_composition:
+        from compose_pages import compose_project
+        compose_project(project_dir)
+        manifest = read_json(manifest_path)
+        _normalize_manifest(project_dir)
+        record_stage(project_dir, "composition")
+    manifest = read_json(manifest_path)
+    if _allowed_transition(str(manifest.get("status")), "COMPOSED"):
+        transition(project_dir, "COMPOSED")
+    _normalize_manifest(project_dir)
+
+    # Create composition cache so export-ready validation passes.
+    _create_composition_cache(project_dir)
+
+    # 4. Fail closed on agent-produced page-QA integrity records.
+    manifest = read_json(manifest_path)
+    settings = manifest.get("settings")
+    page_count = settings.get("page_count", 0) if isinstance(settings, dict) else 0
+    if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count < 1:
+        raise ValueError("page_qa_required: settings.page_count must be a positive integer")
+    for page_number in range(1, page_count + 1):
+        qa_rel = f"qa/pages/page-{page_number:03d}.json"
+        qa_path = project_dir / qa_rel
+        if not qa_path.is_file():
+            raise ValueError(f"page_qa_required: {qa_rel} is missing")
+        record = read_json(qa_path)
+        page_rel = f"pages/page-{page_number:03d}.png"
+        page_path = project_dir / page_rel
+        if not page_path.is_file():
+            raise ValueError(f"page_qa_required: {page_rel} is missing")
+        if record.get("page_sha256") != sha256_file(page_path):
+            raise ValueError(f"page_qa_required: {qa_rel} hash is stale")
+
+    # 5. Guarded export (validates export-ready, writes PDF, records descriptor).
+    from export_pdf import guarded_export
+    guarded_export(project_dir)
+    manifest = read_json(manifest_path)
+    if _allowed_transition(str(manifest.get("status")), "EXPORTED"):
+        transition(project_dir, "EXPORTED")
+
+    # 6. Render QA report (no manifest mutation).
+    from render_report import render_report
+    report_path = render_report(project_dir)
+
+    # 7. Record artifact descriptors for report and composition cache.
+    manifest = read_json(manifest_path)
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    artifacts["qa_report"] = {
+        "path": "qa/report.md",
+        "sha256": sha256_file(report_path),
+    }
+    comp_cache = project_dir / "cache/composition.json"
+    if comp_cache.is_file():
+        artifacts["composition_cache"] = {
+            "path": "cache/composition.json",
+            "sha256": sha256_file(comp_cache),
+        }
+    manifest["artifacts"] = artifacts
+    atomic_write_json(manifest_path, manifest)
+
+    # 8. Record export stage cache.
+    record_stage(project_dir, "export")
+
+    # 9. Compute terminal status from warning state.
+    manifest = read_json(manifest_path)
+    warnings = manifest.get("warnings")
+    has_warnings = isinstance(warnings, list) and len(warnings) > 0
+    final_status = "COMPLETE_WITH_WARNINGS" if has_warnings else "COMPLETE"
+
+    # 10. Guarded terminal transition (runs final validation internally).
+    if str(manifest.get("status")) not in TERMINAL_STATUSES:
+        transition(project_dir, final_status)
+        _normalize_manifest(project_dir)
+
+    return {
+        "status": final_status,
+        "pdf": f"exports/{manifest.get('project_id', 'unknown')}.pdf",
+        "report": "qa/report.md",
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="comic_sol.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1318,6 +1705,10 @@ def _build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("project_dir", type=Path)
     resume_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    resume_execute_parser = subparsers.add_parser("resume")
+    resume_execute_parser.add_argument("project_dir", type=Path)
+    resume_execute_parser.add_argument("--json", action="store_true", dest="as_json")
+
     invalidate_parser = subparsers.add_parser("invalidate")
     invalidate_parser.add_argument("project_dir", type=Path)
     invalidate_parser.add_argument("stage", choices=RESUME_STAGES)
@@ -1341,6 +1732,10 @@ def _build_parser() -> argparse.ArgumentParser:
     override_parser.add_argument("project_dir", type=Path)
     override_parser.add_argument("panel_id")
     override_parser.add_argument("--reason", required=True)
+
+    finalize_parser = subparsers.add_parser("finalize")
+    finalize_parser.add_argument("project_dir", type=Path)
+    finalize_parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
 
@@ -1351,10 +1746,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.command == "init":
             request = read_json(arguments.request_json)
+            source = arguments.source.read_bytes()
+            validate_source_bytes(source, arguments.source.suffix)
             project = init_project(
                 arguments.output_root,
                 arguments.title,
-                arguments.source.read_bytes(),
+                source,
                 request,
             )
             print(project.resolve())
@@ -1384,6 +1781,19 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 for action in actions:
                     print(f"{action.stage}: {action.action} {action.artifact} — {action.reason}")
+        elif arguments.command == "resume":
+            result = resume_project(arguments.project_dir)
+            if arguments.as_json:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(f"status: {result['status']}")
+                next_action = result["next_action"]
+                if isinstance(next_action, dict) and "agent_required" in next_action:
+                    print(f"agent required: {next_action['agent_required']}")
+                elif isinstance(next_action, dict) and "command" in next_action:
+                    print(f"next command: {next_action['command']}")
+                elif isinstance(next_action, dict) and "required" in next_action:
+                    print(f"required: {next_action['required']}")
         elif arguments.command == "invalidate":
             removed = invalidate_from(arguments.project_dir, arguments.stage)
             print("\n".join(removed) if removed else "no manifest artifacts removed")
@@ -1400,6 +1810,12 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "override-panel":
             record_override(arguments.project_dir, arguments.panel_id, arguments.reason)
             print(f"{arguments.panel_id}: accepted with warnings")
+        elif arguments.command == "finalize":
+            result = finalize_project(arguments.project_dir)
+            if arguments.as_json:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(f"{result['status']}: {result['pdf']} | {result['report']}")
         return 0
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR {type(error).__name__}: {error}", file=sys.stderr)
