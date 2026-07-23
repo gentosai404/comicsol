@@ -20,6 +20,7 @@ from PIL import Image, ImageFont
 
 from project_io import (
     ProjectLock,
+    ProjectTransaction,
     contained_project_path,
     durable_atomic_write,
     validate_source_bytes,
@@ -68,6 +69,14 @@ STAGE_INVALIDATION_STATUS = {
     "lettering": "QA_READY",
     "composition": "LETTERED",
     "export": "COMPOSED",
+}
+STAGE_COMPLETION_STATUS = {
+    "planning": "SCRIPTED",
+    "storyboard": "STORYBOARDED",
+    "generation": "QA_READY",
+    "lettering": "LETTERED",
+    "composition": "COMPOSED",
+    "export": "EXPORTED",
 }
 ARTIFACT_STAGE = {
     "story_plan": "planning",
@@ -436,6 +445,10 @@ def transition(
     warning: str | None = None,
 ) -> dict[str, object]:
     """Move a project by one legal state, publishing the manifest last."""
+    if target == "BLOCKED":
+        block_warning = warning or "project blocked"
+        reason = re.sub(r"[^a-z0-9]+", "-", block_warning.lower()).strip("-")
+        return block_project(project_dir, reason or "project-blocked", block_warning)
     project_dir = Path(project_dir)
     manifest_path = project_dir / "project.json"
     manifest = read_json(manifest_path)
@@ -1001,6 +1014,132 @@ def build_resume_plan(project_dir: Path) -> list[ResumeAction]:
     return actions
 
 
+def _warning_reason(warning: object) -> str | None:
+    if not isinstance(warning, str):
+        return None
+    return re.sub(r"[^a-z0-9]+", "-", warning.lower()).strip("-")
+
+
+def block_project(project_dir: Path, reason: str, warning: str) -> dict[str, object]:
+    """Record a recoverable block with its last normal state."""
+    if not isinstance(reason, str) or CATEGORY.fullmatch(reason) is None:
+        raise ValueError("blocked reason must be a stable category")
+    if not isinstance(warning, str) or not warning.strip():
+        raise ValueError("blocked warning must not be empty")
+    project_dir = Path(project_dir).resolve(strict=True)
+    manifest_path = contained_project_path(project_dir, "project.json", must_exist=True)
+    with ProjectLock(project_dir):
+        manifest = read_json(manifest_path)
+        current = manifest.get("status")
+        if not isinstance(current, str) or not _allowed_transition(current, "BLOCKED"):
+            raise ValueError(f"invalid Comic Sol transition: {current} -> BLOCKED")
+        warnings = manifest.get("warnings")
+        if not isinstance(warnings, list):
+            raise ValueError("manifest warnings must be an array")
+        normalized_warning = warning.strip()
+        if normalized_warning not in warnings:
+            warnings.append(normalized_warning)
+        manifest.update({
+            "blocked_from": current,
+            "blocked_reason": reason,
+            "status": "BLOCKED",
+            "updated_at": _utc_now(),
+        })
+        append_event(
+            project_dir,
+            "project.transitioned",
+            {"from": current, "to": "BLOCKED", "warning_present": True},
+        )
+        atomic_write_json(manifest_path, manifest)
+        return manifest
+
+
+def _resolved_block(manifest: dict[str, object], reason: str) -> bool:
+    if reason != "image-capability-unavailable":
+        return True
+    capability = manifest.get("capability")
+    return isinstance(capability, dict) and capability.get("status") == "available"
+
+
+def _next_resume_action(project_dir: Path, stage: str | None) -> dict[str, str] | None:
+    if stage is None:
+        return None
+    if stage in {"planning", "storyboard", "generation"}:
+        return {"agent_required": stage}
+    commands = {
+        "lettering": "scripts/letter_panels.py",
+        "composition": "scripts/compose_pages.py",
+        "export": "scripts/export_pdf.py",
+    }
+    return {"command": f"{sys.executable} {ROOT / commands[stage]} {project_dir}"}
+
+
+def resume_project(project_dir: Path) -> dict[str, object]:
+    """Recover transactions and move a blocked project to its last valid state."""
+    project_dir = Path(project_dir).resolve(strict=True)
+    manifest_path = contained_project_path(project_dir, "project.json", must_exist=True)
+    ProjectTransaction.recover(project_dir)
+    with ProjectLock(project_dir):
+        manifest = read_json(manifest_path)
+        if manifest.get("status") != "BLOCKED":
+            raise ValueError("resume requires a BLOCKED project")
+        actions = build_resume_plan(project_dir)
+        stage_actions = {
+            action.stage: action
+            for action in actions
+            if action.artifact == "stage"
+        }
+        preserved: list[str] = []
+        stale_stage: str | None = None
+        for stage in RESUME_STAGES:
+            action = stage_actions.get(stage)
+            if stale_stage is None and action is not None and action.action == "reuse":
+                preserved.append(stage)
+            elif stale_stage is None:
+                stale_stage = stage
+        invalidated = (
+            list(RESUME_STAGES[RESUME_STAGES.index(stale_stage):])
+            if stale_stage is not None else []
+        )
+        blocked_from = manifest.get("blocked_from")
+        if blocked_from not in LINEAR_STATUSES:
+            blocked_from = STAGE_COMPLETION_STATUS[preserved[-1]] if preserved else "INIT"
+            manifest["blocked_from"] = blocked_from
+        reason = manifest.get("blocked_reason")
+        if not isinstance(reason, str) or CATEGORY.fullmatch(reason) is None:
+            reason = "legacy-blocked"
+            manifest["blocked_reason"] = reason
+        if not _resolved_block(manifest, reason):
+            atomic_write_json(manifest_path, manifest)
+            return {
+                "status": "BLOCKED",
+                "preserved": preserved,
+                "invalidated": [],
+                "next_action": {"required": "image capability available"},
+            }
+        if stale_stage is not None:
+            invalidate_from(project_dir, stale_stage)
+            manifest = read_json(manifest_path)
+        recovery_status = STAGE_COMPLETION_STATUS[preserved[-1]] if preserved else "INIT"
+        warnings = manifest.get("warnings")
+        if not isinstance(warnings, list):
+            raise ValueError("manifest warnings must be an array")
+        manifest["warnings"] = [
+            item for item in warnings if _warning_reason(item) != reason
+        ]
+        manifest["status"] = recovery_status
+        manifest["blocked_from"] = None
+        manifest["blocked_reason"] = None
+        manifest["updated_at"] = _utc_now()
+        atomic_write_json(manifest_path, manifest)
+        return {
+            "status": recovery_status,
+            "preserved": preserved,
+            "invalidated": invalidated,
+            "next_action": _next_resume_action(project_dir, stale_stage),
+        }
+
+
 def invalidate_from(project_dir: Path, stage: str) -> list[str]:
     """Forget manifest/cache descriptors from a stage onward without deleting artifacts."""
     if stage not in RESUME_STAGES:
@@ -1358,6 +1497,10 @@ def _build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("project_dir", type=Path)
     resume_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    resume_execute_parser = subparsers.add_parser("resume")
+    resume_execute_parser.add_argument("project_dir", type=Path)
+    resume_execute_parser.add_argument("--json", action="store_true", dest="as_json")
+
     invalidate_parser = subparsers.add_parser("invalidate")
     invalidate_parser.add_argument("project_dir", type=Path)
     invalidate_parser.add_argument("stage", choices=RESUME_STAGES)
@@ -1426,6 +1569,19 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 for action in actions:
                     print(f"{action.stage}: {action.action} {action.artifact} — {action.reason}")
+        elif arguments.command == "resume":
+            result = resume_project(arguments.project_dir)
+            if arguments.as_json:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(f"status: {result['status']}")
+                next_action = result["next_action"]
+                if isinstance(next_action, dict) and "agent_required" in next_action:
+                    print(f"agent required: {next_action['agent_required']}")
+                elif isinstance(next_action, dict) and "command" in next_action:
+                    print(f"next command: {next_action['command']}")
+                elif isinstance(next_action, dict) and "required" in next_action:
+                    print(f"required: {next_action['required']}")
         elif arguments.command == "invalidate":
             removed = invalidate_from(arguments.project_dir, arguments.stage)
             print("\n".join(removed) if removed else "no manifest artifacts removed")

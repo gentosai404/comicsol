@@ -21,6 +21,7 @@ from comic_sol import (
     ALL_STATUSES,
     CATEGORY,
     GUTTER,
+    LINEAR_STATUSES,
     MARGIN,
     PAGE_HEIGHT,
     PAGE_WIDTH,
@@ -200,12 +201,13 @@ def _string_list(
 def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
     path = "project.json"
     issues: list[ValidationIssue] = []
-    fields = {
+    required_fields = {
         "schema_version", "project_id", "title", "created_at", "updated_at",
         "status", "input", "settings", "capability", "artifacts",
         "stage_versions", "panels", "warnings",
     }
-    root = _object(data, fields, fields, issues, path, "")
+    fields = required_fields | {"blocked_from", "blocked_reason"}
+    root = _object(data, fields, required_fields, issues, path, "")
     if root is None:
         return _sorted(issues)
     if root.get("schema_version") != "1.0":
@@ -216,6 +218,17 @@ def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
     _timestamp(root.get("updated_at"), issues, path, "updated_at")
     if root.get("status") not in ALL_STATUSES:
         _add(issues, path, "status", "unknown manifest status")
+    if root.get("status") == "BLOCKED":
+        if root.get("blocked_from") not in LINEAR_STATUSES:
+            _add(issues, path, "blocked_from", "must be a normal pipeline status")
+        blocked_reason = root.get("blocked_reason")
+        if (
+            not isinstance(blocked_reason, str)
+            or CATEGORY.fullmatch(blocked_reason) is None
+        ):
+            _add(issues, path, "blocked_reason", "must be a stable category")
+    elif root.get("blocked_from") is not None or root.get("blocked_reason") is not None:
+        _add(issues, path, "status", "blocked fields must be null when not BLOCKED")
 
     input_fields = {"mode", "source_path", "source_sha256", "request_path", "language"}
     input_data = _object(root.get("input"), input_fields, input_fields, issues, path, "input")

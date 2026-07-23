@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from comic_sol import (  # noqa: E402
     ResumeAction,
     atomic_write_json,
+    block_project,
     build_resume_plan,
     init_project,
     invalidate_from,
@@ -27,6 +28,7 @@ from comic_sol import (  # noqa: E402
     record_generation_attempt,
     record_override,
     record_stage,
+    resume_project,
     sha256_file,
     stage_cache_key,
     transition,
@@ -957,6 +959,201 @@ class ResumeFixtureIntegrationTests(unittest.TestCase):
             panel_actions = {a.artifact: a.action for a in actions if a.artifact.startswith("p")}
             self.assertEqual("regenerate", panel_actions["p01-01"])
             self.assertEqual("regenerate", panel_actions["p01-02"])
+
+
+class BlockedRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.project = init_project(
+            self.root,
+            "Sunlight Courier",
+            b"A courier carries the last light.",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        story = {
+            "schema_version": "1.0", "title": "Sunlight Courier",
+            "scenes": [{"id": "hall", "characters": ["mira"]}],
+        }
+        characters = {
+            "schema_version": "1.0",
+            "characters": [{
+                "id": "mira",
+                "visual_fingerprint": {"invariants": ["amber scarf", "round clasp"]},
+                "reference_path": "references/characters/mira.png",
+            }],
+        }
+        storyboard = {
+            "schema_version": "1.0",
+            "pages": [{
+                "number": 1, "layout": "full-page",
+                "panels": [{
+                    "id": "p01-01", "scene_id": "hall", "characters": ["mira"],
+                    "rect": {"x": 64, "y": 64, "width": 1472, "height": 2272},
+                    "text": [{"id": "p01-01-t01", "content": "One last delivery."}],
+                }],
+            }],
+        }
+        atomic_write_json(self.project / "plan/story-plan.json", story)
+        atomic_write_json(self.project / "plan/character-bible.json", characters)
+        atomic_write_json(self.project / "plan/storyboard.json", storyboard)
+        (self.project / "prompts/panels/p01-01.txt").write_text("panel prompt\n", "utf-8")
+        (self.project / "panels/p01-01").mkdir(exist_ok=True)
+        for relative, color in (
+            ("references/characters/mira.png", "orange"),
+            ("panels/raw/p01-01.png", "navy"),
+            ("panels/clean/p01-01.png", "blue"),
+            ("panels/p01-01/lettered.png", "white"),
+            ("pages/page-001.png", "gray"),
+        ):
+            Image.new("RGB", (512, 512), color).save(self.project / relative)
+        self._write_json("qa/panels/p01-01.json", {
+            "schema_version": "1.0",
+            "panel_id": "p01-01",
+            "source_prompt_path": "prompts/panels/p01-01.txt",
+            "raw_path": "panels/raw/p01-01.png",
+            "clean_path": "panels/clean/p01-01.png",
+            "raw_sha256": sha256_file(self.project / "panels/raw/p01-01.png"),
+            "dimensions": {"height": 512, "width": 512},
+            "attempts": 1,
+            "generation": {
+                "capability_name": "test-image",
+                "completed_at": "2026-07-20T00:00:00Z",
+                "reference_paths": ["references/characters/mira.png"],
+            },
+            "checks": [
+                {"id": cid, "result": "pass", "severity": "error", "evidence": "ok"}
+                for cid in ("character-identity", "anatomy", "action", "composition",
+                             "continuity", "text-free", "technical")
+            ],
+            "decision": "accept",
+            "retry_reason": None,
+            "unresolved_warnings": [],
+        })
+        (self.project / "qa/report.md").write_text("# QA\n", "utf-8")
+        (self.project / "exports/sunlight-courier.pdf").write_bytes(b"%PDF-1.4\nfixture\n")
+
+        manifest = read_json(self.project / "project.json")
+        manifest.update({
+            "status": "STORYBOARDED",
+            "panels": ["p01-01"],
+            "artifacts": {
+                "story_plan": {"path": "plan/story-plan.json",
+                                "sha256": sha256_file(self.project / "plan/story-plan.json")},
+                "character_bible": {"path": "plan/character-bible.json",
+                                    "sha256": sha256_file(self.project / "plan/character-bible.json")},
+                "storyboard": {"path": "plan/storyboard.json",
+                               "sha256": sha256_file(self.project / "plan/storyboard.json")},
+            },
+        })
+        manifest["settings"].update({"page_count": 1, "panel_count": 1})
+        manifest["warnings"] = ["unrelated continuity warning"]
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:00:00Z",
+            "name": None,
+            "status": "unavailable",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        cache = {"schema_version": "1.0", "stages": {}}
+        from comic_sol import _resume_stage_material
+        for stage in ("planning", "storyboard"):
+            canonical_inputs, files = _resume_stage_material(self.project, stage, manifest)
+            outputs = {"planning": ["plan/story-plan.json", "plan/character-bible.json"],
+                        "storyboard": ["plan/storyboard.json"]}[stage]
+            cache["stages"][stage] = {
+                "key": stage_cache_key(stage, canonical_inputs, files, manifest["stage_versions"][stage]),
+                "artifacts": {r: sha256_file(self.project / r) for r in outputs},
+            }
+        atomic_write_json(self.project / "logs/stage-cache.json", cache)
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def _write_json(self, relative, data):
+        path = self.project / relative
+        atomic_write_json(path, data)
+        return path
+
+
+    def test_blocked_project_resumes_without_losing_valid_artifacts(self):
+        warning = "image capability unavailable"
+        before = {
+            relative: (self.project / relative).read_bytes()
+            for relative in (
+                "plan/story-plan.json",
+                "plan/character-bible.json",
+                "plan/storyboard.json",
+            )
+        }
+        blocked = block_project(
+            self.project, "image-capability-unavailable", warning
+        )
+        self.assertEqual("BLOCKED", blocked["status"])
+        self.assertEqual("STORYBOARDED", blocked["blocked_from"])
+        self.assertEqual("image-capability-unavailable", blocked["blocked_reason"])
+
+        manifest = read_json(self.project / "project.json")
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:01:00Z",
+            "name": "restored-image-tool",
+            "status": "available",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        result = resume_project(self.project)
+
+        self.assertEqual("STORYBOARDED", result["status"])
+        self.assertEqual(["planning", "storyboard"], result["preserved"])
+        self.assertEqual(["generation", "lettering", "composition", "export"], result["invalidated"])
+        self.assertEqual({"agent_required": "generation"}, result["next_action"])
+        resumed = read_json(self.project / "project.json")
+        self.assertIsNone(resumed["blocked_from"])
+        self.assertIsNone(resumed["blocked_reason"])
+        self.assertEqual(["unrelated continuity warning"], resumed["warnings"])
+        for relative, payload in before.items():
+            self.assertEqual(payload, (self.project / relative).read_bytes())
+
+    def test_resume_cli_reports_actionable_json_and_human_output(self):
+        block_project(
+            self.project,
+            "image-capability-unavailable",
+            "image capability unavailable",
+        )
+        manifest = read_json(self.project / "project.json")
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:01:00Z",
+            "name": "restored-image-tool",
+            "status": "available",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, main(["resume", os.fspath(self.project), "--json"]))
+        self.assertEqual(
+            {"agent_required": "generation"},
+            json.loads(output.getvalue())["next_action"],
+        )
+
+    def test_resume_cli_human_output(self):
+        block_project(
+            self.project,
+            "image-capability-unavailable",
+            "image capability unavailable",
+        )
+        manifest = read_json(self.project / "project.json")
+        manifest["capability"].update({
+            "detected_at": "2026-07-23T00:01:00Z",
+            "name": "restored-image-tool",
+            "status": "available",
+        })
+        atomic_write_json(self.project / "project.json", manifest)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, main(["resume", os.fspath(self.project)]))
+        self.assertIn("agent required: generation", output.getvalue())
 
 
 if __name__ == "__main__":
