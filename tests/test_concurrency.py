@@ -189,6 +189,13 @@ class ProjectLockTests(unittest.TestCase):
                 self.assertEqual(["unlock", "close"], events[-2:])
                 self.assertIsNone(lock._handle)
 
+    def test_stale_empty_lock_file_is_recovered(self):
+        """Crash between truncate and PID write must not permanently block project."""
+        lock_path = self.project / ".comic-sol.lock"
+        lock_path.write_bytes(b"")
+        with project_io.ProjectLock(self.project, timeout=0.1):
+            self.assertEqual(f"{os.getpid()}\n", lock_path.read_text("ascii"))
+
     def test_lock_file_is_retained_with_sanitized_pid_metadata(self):
         with project_io.ProjectLock(self.project, timeout=1.0):
             metadata = (self.project / ".comic-sol.lock").read_text(encoding="ascii")

@@ -48,8 +48,19 @@ class ProjectLock:
             while True:
                 handle.seek(0, os.SEEK_END)
                 if handle.tell() == 0:
+                    # No metadata means writer crashed between create+write
+                    # or truncate+write. Try to acquire flock directly; if
+                    # we succeed, no real holder exists (stale lock).
+                    try:
+                        self._lock(handle)
+                        acquired = True
+                        break
+                    except OSError:
+                        pass  # real contention, keep waiting
                     if time.monotonic() >= deadline:
-                        raise TimeoutError("project is locked by another process")
+                        raise TimeoutError(
+                            "project is locked by another process"
+                        )
                 else:
                     try:
                         self._lock(handle)
