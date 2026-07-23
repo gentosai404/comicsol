@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 
 MAX_SOURCE_BYTES = 200 * 1024
 SOURCE_SUFFIXES = {".txt", ".md"}
-_DRIVE = re.compile(r"^[A-Za-z]:[/\\]")
+_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 def validate_source_bytes(source: bytes, suffix: str | None = None) -> str:

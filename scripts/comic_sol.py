@@ -1133,9 +1133,14 @@ def promote_attempt(project_dir: Path, panel_id: str, attempt_path: Path) -> Pat
     if not IDENTIFIER.fullmatch(panel_id):
         raise ValueError("invalid panel ID")
     project_dir = Path(project_dir)
-    attempt = _contained_project_path(project_dir, Path(attempt_path))
+    attempt_relative = Path(attempt_path)
+    attempt = _contained_project_path(project_dir, attempt_relative)
     if not attempt.is_file():
         raise ValueError("attempt path must be a retained file")
+    if attempt_relative.is_absolute():
+        attempt_relative = attempt.relative_to(project_dir.resolve(strict=True))
+    _contained_project_path(project_dir, attempt_relative)
+    attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
     _verify_raster(attempt)
     destination = project_dir / f"panels/raw/{panel_id}.png"
     if destination.is_file() and sha256_file(destination) != sha256_file(attempt):
@@ -1146,6 +1151,7 @@ def promote_attempt(project_dir: Path, panel_id: str, attempt_path: Path) -> Pat
                 atomic_write_bytes(archive, destination.read_bytes())
                 break
             number += 1
+    attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
     atomic_write_bytes(destination, attempt.read_bytes())
     return destination
 

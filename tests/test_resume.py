@@ -353,6 +353,65 @@ class ResumeTests(unittest.TestCase):
             promote_attempt(self.project, "p01-01", broken)
         self.assertEqual(before, sha256_file(destination))
 
+    def test_promotion_rechecks_original_relative_path_before_verification(self):
+        attempt = self.project / "panels/raw/p01-01.swap-before-verify.png"
+        outside = self.root / "outside-valid.png"
+        Image.new("RGB", (640, 960), "green").save(attempt)
+        Image.new("RGB", (640, 960), "red").save(outside)
+        real_resolver = __import__("comic_sol")._contained_project_path
+        calls = 0
+
+        def swap_after_preflight(project_dir, path):
+            nonlocal calls
+            result = real_resolver(project_dir, path)
+            if Path(path) == attempt and calls == 0:
+                calls += 1
+                attempt.unlink()
+                attempt.symlink_to(outside)
+            return result
+
+        try:
+            probe = self.project / "symlink-probe"
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+        with patch("comic_sol._contained_project_path", side_effect=swap_after_preflight):
+            with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+                promote_attempt(self.project, "p01-01", attempt)
+
+    def test_promotion_rechecks_original_relative_path_before_read(self):
+        attempt = self.project / "panels/raw/p01-01.swap-before-read.png"
+        outside = self.root / "outside-valid.png"
+        Image.new("RGB", (640, 960), "green").save(attempt)
+        Image.new("RGB", (640, 960), "red").save(outside)
+        from comic_sol import _verify_raster
+
+        def verify_then_swap(path):
+            result = _verify_raster(path)
+            attempt.unlink()
+            attempt.symlink_to(outside)
+            return result
+
+        try:
+            probe = self.project / "symlink-probe"
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+        with patch("comic_sol._verify_raster", side_effect=verify_then_swap):
+            with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+                promote_attempt(self.project, "p01-01", attempt)
+
+    def test_cli_attempt_path_rejection_matches_shared_semantics(self):
+        for command in ("record-attempt", "promote-attempt"):
+            arguments = [command, os.fspath(self.project), "p01-01"]
+            if command == "record-attempt":
+                arguments.append("initial")
+            arguments.append("C:outside.png")
+            with self.subTest(command=command), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(arguments))
+
     def test_retry_budgets_and_transient_accounting(self):
         for number in (2, 3):
             attempt = self.project / f"panels/raw/p01-01.attempt-{number}.png"

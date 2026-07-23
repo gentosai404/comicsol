@@ -770,7 +770,6 @@ def _letter_project_with_summaries(
         for panel in panels:
             panel_id = panel["id"]
             source_relative = f"panels/clean/{panel_id}.png"
-            source = contained_project_path(project_dir, source_relative, must_exist=True)
             destination = contained_project_path(
                 project_dir, f"panels/{panel_id}/lettered.png"
             )

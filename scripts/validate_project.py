@@ -961,8 +961,12 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                 except ValueError:
                     pass
                 else:
-                    if image_path.is_file() and SHA256_PATTERN.fullmatch(raw_hash) and sha256_file(image_path) != raw_hash:
-                        _add(issues, record_relative, "raw_sha256", "hash does not match the raw image")
+                    if image_path.is_file() and SHA256_PATTERN.fullmatch(raw_hash):
+                        image_path = contained_project_path(
+                            project_dir, raw_path, must_exist=True
+                        )
+                        if sha256_file(image_path) != raw_hash:
+                            _add(issues, record_relative, "raw_sha256", "hash does not match the raw image")
             prompt_path = record.get("source_prompt_path")
             if isinstance(prompt_path, str):
                 try:
@@ -993,8 +997,12 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                 else:
                     if not source_file.is_file():
                         _add(issues, "project.json", "input.source_path", "referenced source is missing")
-                    elif SHA256_PATTERN.fullmatch(source_hash) and sha256_file(source_file) != source_hash:
-                        _add(issues, "project.json", "input.source_sha256", "hash does not match the source")
+                    elif SHA256_PATTERN.fullmatch(source_hash):
+                        source_file = contained_project_path(
+                            project_dir, source_path, must_exist=True
+                        )
+                        if sha256_file(source_file) != source_hash:
+                            _add(issues, "project.json", "input.source_sha256", "hash does not match the source")
 
     if stage in {"all", "final"} and manifest is not None:
         for record_path, reason in panel_errors:
@@ -1048,8 +1056,12 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                     else:
                         if not artifact.is_file():
                             _add(issues, "project.json", f"artifacts.{name}.path", "referenced artifact is missing")
-                        elif SHA256_PATTERN.fullmatch(expected_hash) and sha256_file(artifact) != expected_hash:
-                            _add(issues, "project.json", f"artifacts.{name}.sha256", "hash does not match the artifact")
+                        elif SHA256_PATTERN.fullmatch(expected_hash):
+                            artifact = contained_project_path(
+                                project_dir, relative_path, must_exist=True
+                            )
+                            if sha256_file(artifact) != expected_hash:
+                                _add(issues, "project.json", f"artifacts.{name}.sha256", "hash does not match the artifact")
     return _sorted(issues)
 
 

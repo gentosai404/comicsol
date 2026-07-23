@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -116,6 +117,31 @@ class CompositionTests(unittest.TestCase):
                 self.project, 1, self.storyboard, self.settings,
                 {"p01-01": {"path": "panels/linked.png"}},
             )
+
+    def test_symlink_swap_after_preflight_is_rejected_before_image_open(self):
+        outside = Path(self.temporary_directory.name).parent / "outside-swapped-panel.png"
+        Image.new("RGB", (800, 800), "blue").save(outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+        source = self.project / "panels/p01-01/lettered.png"
+
+        from compose_pages import _page_sources
+
+        def swap_after_preflight(*args, **kwargs):
+            sources = _page_sources(*args, **kwargs)
+            source.unlink()
+            source.symlink_to(outside)
+            return sources
+
+        try:
+            probe = self.project / "symlink-probe"
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink unavailable: {error}")
+
+        with patch("compose_pages._page_sources", side_effect=swap_after_preflight):
+            with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
+                compose_page(self.project, 1, self.storyboard, self.settings, {})
 
     def test_repeated_composition_has_identical_bytes(self):
         path = compose_page(self.project, 1, self.storyboard, self.settings, {})

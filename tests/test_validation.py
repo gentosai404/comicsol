@@ -575,6 +575,38 @@ class ProjectValidationTests(unittest.TestCase):
             issues = validate_project(self.project, "panels")
         self.assertTrue(any("escapes the project" in issue.message for issue in issues), issues)
 
+    def test_hash_reads_repeat_shared_resolution_for_original_relative_paths(self):
+        import validate_project as validation_module
+
+        self.add_panel_files()
+        manifest_path = self.project / "project.json"
+        manifest = read_json(manifest_path)
+        artifact_relative = "plan/story-plan.json"
+        manifest["artifacts"]["story_plan"] = {
+            "path": artifact_relative,
+            "sha256": sha256_file(self.project / artifact_relative),
+        }
+        atomic_write_json(manifest_path, manifest)
+
+        for stage, relative, minimum_calls in (
+            ("panels", "panels/raw/p01-01.png", 3),
+            ("panels", "source/input.txt", 2),
+            ("final", artifact_relative, 2),
+        ):
+            with self.subTest(stage=stage, relative=relative):
+                calls = []
+                real_resolver = validation_module.contained_project_path
+
+                def recording_resolver(project_dir, candidate, **kwargs):
+                    if candidate == relative:
+                        calls.append((candidate, kwargs.get("must_exist", False)))
+                    return real_resolver(project_dir, candidate, **kwargs)
+
+                with patch("validate_project.contained_project_path", side_effect=recording_resolver):
+                    validate_project(self.project, stage)
+                self.assertGreaterEqual(len(calls), minimum_calls, calls)
+                self.assertTrue(calls[-1][1], calls)
+
     def test_project_validation_error_exposes_immutable_issue_tuple(self):
         issue = ValidationIssue("project.json", "status", "invalid")
         error = ProjectValidationError([issue])

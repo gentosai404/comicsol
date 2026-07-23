@@ -86,6 +86,17 @@ class McpServerUnitTests(unittest.TestCase):
             mcp_server.comic_init("Too Large", "a" * (200 * 1024 + 1), {})
         self.assertEqual(before, list(self.root.iterdir()))
 
+    def test_attempt_tools_reject_same_drive_relative_path_as_cli(self):
+        project = self.root / "project"
+        project.mkdir()
+        for tool, arguments in (
+            (mcp_server.comic_record_attempt, ("project", "p01-01", "initial", "C:outside.png")),
+            (mcp_server.comic_promote_attempt, ("project", "p01-01", "C:outside.png")),
+        ):
+            with self.subTest(tool=tool.__name__):
+                with self.assertRaisesRegex(ToolError, "relative project path"):
+                    tool(*arguments)
+
 
 class McpProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def test_stdio_protocol_exercises_all_tools(self):

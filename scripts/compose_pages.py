@@ -28,31 +28,33 @@ def _storyboard_page(storyboard: dict, page_number: int) -> dict:
     return matches[0]
 
 
-def _artifact_path(project_dir: Path, panel_id: str, source_artifacts: dict) -> Path:
+def _artifact_path(project_dir: Path, panel_id: str, source_artifacts: dict) -> str | Path:
     configured = source_artifacts.get(panel_id)
     if isinstance(configured, dict):
         configured = configured.get("path")
-    candidates: list[Path] = []
+    candidates: list[str | Path] = []
     if isinstance(configured, (str, Path)):
-        candidates.append(contained_project_path(project_dir, configured))
-    candidates.extend(contained_project_path(project_dir, relative) for relative in (
+        candidates.append(configured)
+    candidates.extend((
         f"panels/{panel_id}/lettered.png",
         f"pages/{panel_id}.png",
         f"panels/lettered/{panel_id}.png",
     ))
-    for candidate in candidates:
+    for relative in candidates:
+        candidate = contained_project_path(project_dir, relative)
         if candidate.is_file():
-            return contained_project_path(
-                project_dir, candidate.relative_to(project_dir.resolve()), must_exist=True
-            )
+            contained_project_path(project_dir, relative, must_exist=True)
+            return relative
     raise FileNotFoundError(f"missing required lettered panel image: {panel_id}")
 
 
-def _page_sources(project_dir: Path, page: dict, source_artifacts: dict) -> list[tuple[dict, Path]]:
+def _page_sources(
+    project_dir: Path, page: dict, source_artifacts: dict
+) -> list[tuple[dict, str | Path]]:
     panels = page.get("panels")
     if not isinstance(panels, list):
         raise ValueError(f"page {page.get('number')} panels must be an array")
-    sources: list[tuple[dict, Path]] = []
+    sources: list[tuple[dict, str | Path]] = []
     missing: list[str] = []
     for panel in panels:
         if not isinstance(panel, dict) or not isinstance(panel.get("id"), str):
@@ -99,15 +101,19 @@ def _rect(panel: dict) -> tuple[int, int, int, int]:
 
 
 def _compose_to_bytes(
+    project_dir: Path,
     page: dict,
-    sources: list[tuple[dict, Path]],
+    sources: list[tuple[dict, str | Path]],
     manifest_settings: dict,
 ) -> bytes:
     canvas = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), _background_color(manifest_settings))
     draw = ImageDraw.Draw(canvas)
-    for panel, source_path in sources:
+    for panel, source_relative in sources:
         x, y, width, height = _rect(panel)
         try:
+            source_path = contained_project_path(
+                project_dir, source_relative, must_exist=True
+            )
             with Image.open(source_path) as source:
                 source.load()
                 fitted = ImageOps.fit(
@@ -148,7 +154,7 @@ def compose_page(
     project_dir = Path(project_dir)
     page = _storyboard_page(storyboard, page_number)
     sources = _page_sources(project_dir, page, source_artifacts)
-    payload = _compose_to_bytes(page, sources, manifest_settings)
+    payload = _compose_to_bytes(project_dir, page, sources, manifest_settings)
     output_path = project_dir / f"pages/page-{page_number:03d}.png"
     atomic_write_bytes(output_path, payload)
     return output_path
