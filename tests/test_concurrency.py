@@ -221,23 +221,16 @@ class RetryCounterProcessTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def _seed_project(self):
+        from PIL import Image as PILImage
+
         for panel_id, color in [
             ("p01-01", "navy"), ("p01-02", "blue"), ("p01-03", "green"),
             ("p01-04", "red"), ("p01-05", "yellow"), ("p01-06", "magenta"),
             ("p01-07", "cyan"), ("p01-08", "white"),
         ]:
             attempt = self.project_dir / f"panels/raw/{panel_id}.initial.png"
-            from PIL import Image as PILImage
             PILImage.new("RGB", (512, 512), color).save(attempt)
             record_generation_attempt(self.project_dir, panel_id, "initial", attempt)
-
-    @staticmethod
-    def _child_script_code():
-        return (
-            "import json, os, sys, time; sys.path.insert(0, os.fspath("
-            "Path(sys.argv[2]) / 'scripts')); from comic_sol import record_generation_attempt;"
-            "p=Path(sys.argv[1]); pid=os.fspath(p / sys.argv[3])"
-        )
 
     def _launch_budget_children(self):
         scripts_root = os.fspath(Path(__file__).resolve().parents[1])
