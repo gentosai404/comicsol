@@ -77,3 +77,56 @@ Implementation commit: `aedf4a1e141fbf28e216cfd5eb77bf3d0c9ffae3` (`fix: lock pr
 ## Concerns
 
 - Native Windows lock path not executed under WSL. Logic follows required `msvcrt` one-byte contract; dedicated native-Windows validation remains advisable.
+
+## Review-finding fix: race-safe lock acquisition
+
+### RED evidence
+
+```text
+/home/acer/.venvs/comic-sol-mcp/bin/python -m unittest tests.test_concurrency.ProjectLockTests -v
+Ran 5 tests in 0.375s
+FAILED (failures=4)
+```
+
+- Synchronized contender reproduced prior corruption: expected `b'<owner-pid>\n'`, got `b'<owner-pid>\n\x00'`.
+- Injected truncate/write/flush failures each showed close without `_unlock`.
+- Existing subprocess exclusion/release and metadata tests remained green during RED.
+
+### GREEN evidence
+
+```text
+/home/acer/.venvs/comic-sol-mcp/bin/python -m unittest tests.test_concurrency.ProjectLockTests -v
+Ran 5 tests in 0.339s
+OK
+```
+
+```text
+/home/acer/.venvs/comic-sol-mcp/bin/python -m unittest tests.test_project_io tests.test_concurrency tests.test_export_pdf -v
+Ran 22 tests in 2.937s
+OK (skipped=1)
+```
+
+```text
+/home/acer/.venvs/comic-sol-mcp/bin/python -m unittest discover -s tests -v
+Ran 170 tests in 19.722s
+OK (skipped=1)
+```
+
+`git diff --check ed1ca25..HEAD`, working-tree `git diff --check`, and `python -m compileall -q scripts tests` passed.
+
+### Commit
+
+Fix commit: `675ba550a28030ce254f3a2f450163bc4d775448` (`fix: make project lock acquisition race-safe`).
+
+### Self-review
+
+- Scope limited to Task 2 lock implementation and regression tests; no Task 3 changes.
+- Lock backing byte initialized only by exclusive creation (`O_CREAT | O_EXCL`); observers of zero-length initialization state retry without writing and honor timeout.
+- Existing lock file never deleted or replaced. Metadata truncation/write/flush happens only after lock acquisition and yields ASCII `[0-9]+\n`.
+- Acquired state drives cleanup. Post-lock metadata failure attempts matching `_unlock` before close, preserves original failure if unlock also fails, and clears `_handle`.
+- Normal exit uses same `_unlock` helper before close. Windows still locks one initialized byte at offset zero; POSIX `flock` behavior retained.
+- `timeout=0` succeeds on immediately free initialized locks and fails immediately for contention or incomplete initialization.
+
+### Remaining concern
+
+- Native Windows execution still unavailable under WSL; Windows one-byte path remains covered by code review, not native runtime evidence.
