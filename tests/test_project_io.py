@@ -160,5 +160,72 @@ class DurableWriteTests(unittest.TestCase):
             self.assertEqual([destination], list(directory.iterdir()))
 
 
+class ProjectTransactionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.project = Path(self.temporary_directory.name) / "project"
+        (self.project / "pages").mkdir(parents=True)
+        (self.project / "logs").mkdir()
+        (self.project / "pages/page-001.png").write_bytes(b"old-one")
+        (self.project / "pages/page-002.png").write_bytes(b"old-two")
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def test_second_publish_failure_restores_prior_set(self):
+        real_replace = project_io.os.replace
+        calls = 0
+
+        def fail_second_staged_replace(source, destination):
+            nonlocal calls
+            source_path = Path(source)
+            if source_path.name.startswith("staged-"):
+                calls += 1
+                if calls == 2:
+                    raise OSError("injected second publish failure")
+            return real_replace(source, destination)
+
+        with self.assertRaisesRegex(OSError, "injected second publish failure"):
+            with mock.patch.object(project_io.os, "replace", side_effect=fail_second_staged_replace):
+                with project_io.ProjectTransaction(self.project, "composition") as transaction:
+                    transaction.stage_bytes("pages/page-001.png", b"new-one")
+                    transaction.stage_bytes("pages/page-002.png", b"new-two")
+                    transaction.commit()
+
+        self.assertEqual(b"old-one", (self.project / "pages/page-001.png").read_bytes())
+        self.assertEqual(b"old-two", (self.project / "pages/page-002.png").read_bytes())
+
+    def test_recover_restores_interrupted_publishing_transaction(self):
+        real_replace = project_io.os.replace
+        calls = 0
+
+        def interrupt_after_first(source, destination):
+            nonlocal calls
+            source_path = Path(source)
+            if source_path.name.startswith("staged-"):
+                calls += 1
+                if calls == 2:
+                    raise KeyboardInterrupt("simulated process interruption")
+            return real_replace(source, destination)
+
+        tx = project_io.ProjectTransaction(self.project, "composition")
+        tx.__enter__()
+        tx.stage_bytes("pages/page-001.png", b"new-one")
+        tx.stage_bytes("pages/page-002.png", b"new-two")
+        try:
+            with mock.patch.object(project_io.os, "replace", side_effect=interrupt_after_first):
+                tx.commit()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if tx._lock is not None:
+                tx._lock.__exit__(None, None, None)
+                tx._lock = None
+
+        project_io.ProjectTransaction.recover(self.project)
+        self.assertEqual(b"old-one", (self.project / "pages/page-001.png").read_bytes())
+        self.assertEqual(b"old-two", (self.project / "pages/page-002.png").read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()

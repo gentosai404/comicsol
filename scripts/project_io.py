@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
+import sys
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
@@ -189,3 +191,204 @@ def durable_atomic_write(path: Path, payload: bytes) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _find_transaction_dir(transaction_dir: Path) -> int:
+    """Return the next available numeric transaction ID."""
+    biggest = 0
+    if transaction_dir.is_dir():
+        for entry in transaction_dir.iterdir():
+            try:
+                value = int(entry.name)
+                if value > biggest:
+                    biggest = value
+            except (ValueError, OSError):
+                pass
+    return biggest + 1
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+class ProjectTransaction:
+    """Durable journal-backed all-or-nothing batch of file replacements.
+
+    Acquires ``ProjectLock`` on enter, creates a numbered transaction
+    directory under ``logs/transactions/<id>/``, writes a durable canonical
+    journal before the first replace, and either commits or rolls back on exit.
+    """
+
+    JOURNAL_SCHEMA_VERSION = "1.0"
+
+    def __init__(self, project_dir: Path, operation: str) -> None:
+        self.project_dir = Path(project_dir)
+        self.operation = operation
+        self._lock: ProjectLock | None = None
+        self._dir: Path | None = None
+        self._journal: list[dict] = []
+        self._phase: str | None = None
+        self._id: int | None = None
+
+    def __enter__(self) -> "ProjectTransaction":
+        self._lock = ProjectLock(self.project_dir).__enter__()
+        try:
+            base = self.project_dir / "logs/transactions"
+            base.mkdir(parents=True, exist_ok=True)
+            self._id = _find_transaction_dir(base)
+            self._dir = base / str(self._id)
+            self._dir.mkdir(parents=True)
+            self._phase = "staging"
+            return self
+        except BaseException:
+            self._lock.__exit__(*sys.exc_info())
+            raise
+
+    def stage_bytes(self, relative: str, payload: bytes) -> None:
+        """Back up old destination (if any) and store staged payload under the
+        transaction directory, recording an entry in the in-memory journal."""
+        if self._dir is None:
+            raise RuntimeError("transaction not started")
+        path = Path(relative)
+        if path.is_absolute():
+            raise ValueError("stage_bytes requires a relative path")
+        dest = self.project_dir / path
+        index = len(self._journal) + 1
+        backup_name = f"backup-{index:03d}-{path.name}"
+        staged_name = f"staged-{index:03d}-{path.name}"
+        backup_path = self._dir / backup_name
+        staged_path = self._dir / staged_name
+        if dest.is_file():
+            durable_atomic_write(backup_path, dest.read_bytes())
+        durable_atomic_write(staged_path, payload)
+        entry = {
+            "path": relative,
+            "backup": (
+                f"logs/transactions/{self._id}/{backup_name}"
+                if dest.is_file() else None
+            ),
+            "staged": f"logs/transactions/{self._id}/{staged_name}",
+        }
+        self._journal.append(entry)
+
+    def commit(self) -> None:
+        """Durably write the canonical journal, then atomically replace each
+        target. On any replace failure, restore backups in reverse order."""
+        if self._dir is None:
+            raise RuntimeError("transaction not started")
+        if self._phase != "staging":
+            raise RuntimeError("transaction already committed or rolling back")
+        self._phase = "publishing"
+        self._write_journal()
+        staging_paths: list[tuple[Path, bool]] = []
+        try:
+            for index, entry in enumerate(self._journal, start=1):
+                dest = self.project_dir / entry["path"]
+                staged = self._dir / f"staged-{index:03d}-{Path(entry['path']).name}"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged, dest)
+                fsync_directory(dest.parent)
+                staging_paths.append((dest, True))
+            self._phase = "committed"
+            self._write_journal()
+            self._cleanup()
+        except BaseException:
+            for dest, _ in reversed(staging_paths):
+                for entry in self._journal:
+                    if entry["path"] == str(Path(dest).relative_to(self.project_dir)):
+                        if entry.get("backup"):
+                            backup = self.project_dir / entry["backup"]
+                            if backup.is_file():
+                                os.replace(backup, dest)
+                                fsync_directory(dest.parent)
+                        break
+            self._phase = "rolled_back"
+            self._write_journal()
+            raise
+
+    def _write_journal(self) -> None:
+        if self._dir is None:
+            return
+        journal = {
+            "schema_version": self.JOURNAL_SCHEMA_VERSION,
+            "operation": self.operation,
+            "phase": self._phase,
+            "targets": self._journal,
+        }
+        durable_atomic_write(self._dir / "journal.json", _canonical_json_bytes(journal))
+
+    def _cleanup(self) -> None:
+        if self._dir is None or not self._dir.is_dir():
+            return
+        for child in self._dir.iterdir():
+            try:
+                child.unlink()
+            except OSError:
+                pass
+        try:
+            self._dir.rmdir()
+        except OSError:
+            pass
+        self._dir = None
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        try:
+            if exc_type is None and self._phase == "staging":
+                self.commit()
+            elif exc_type is not None and self._phase in ("staging", "publishing"):
+                self._phase = "rolled_back"
+                self._write_journal()
+            if self._phase in ("committed", "rolled_back"):
+                self._cleanup()
+        finally:
+            lock = self._lock
+            self._lock = None
+            if lock is not None:
+                lock.__exit__(exc_type, exc, traceback)
+
+    @staticmethod
+    def recover(project_dir: Path) -> None:
+        """Inspect all transaction directories and roll back any incomplete
+        transaction, restoring backups in reverse order."""
+        base = Path(project_dir) / "logs/transactions"
+        if not base.is_dir():
+            return
+        ids: list[int] = []
+        for entry in base.iterdir():
+            try:
+                ids.append(int(entry.name))
+            except (ValueError, OSError):
+                continue
+        for tid in sorted(ids):
+            tx_dir = base / str(tid)
+            journal_path = tx_dir / "journal.json"
+            if not journal_path.is_file():
+                continue
+            try:
+                journal = json.loads(journal_path.read_text("utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            phase = journal.get("phase")
+            targets = journal.get("targets")
+            if not isinstance(targets, list):
+                continue
+            if phase == "committed":
+                pass
+            elif phase in ("staging", "publishing", "rolled_back"):
+                for entry in reversed(targets):
+                    dest = Path(project_dir) / entry["path"]
+                    backup_path = entry.get("backup")
+                    if backup_path:
+                        backup = Path(project_dir) / backup_path
+                        if backup.is_file():
+                            os.replace(backup, dest)
+                            fsync_directory(dest.parent)
+            for child in tx_dir.iterdir():
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+            try:
+                tx_dir.rmdir()
+            except OSError:
+                pass

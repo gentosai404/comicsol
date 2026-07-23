@@ -170,6 +170,44 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(["page-001.png", "page-002.png"], [path.name for path in paths])
         self.assertTrue(all(path.is_file() for path in paths))
 
+    def test_failed_second_page_preserves_entire_prior_page_set(self):
+        # Setup two pages
+        second = {
+            "number": 2, "layout": "full-page",
+            "panels": [{"id": "p02-01", "rect": {"x": 64, "y": 64, "width": 1472, "height": 2272}}],
+        }
+        self.storyboard["pages"].append(second)
+        self.settings["page_count"] = 2
+        (self.project / "panels/p02-01").mkdir(parents=True)
+        Image.new("RGB", (512, 768), "blue").save(self.project / "panels/p02-01/lettered.png")
+        atomic_write_json(self.project / "plan/storyboard.json", self.storyboard)
+        manifest = json.loads((self.project / "project.json").read_text("utf-8"))
+        manifest["settings"] = self.settings
+        atomic_write_json(self.project / "project.json", manifest)
+
+        page_one = self.project / "pages/page-001.png"
+        compose_all_pages(self.project)
+        self.assertTrue(page_one.is_file())
+        old_page_one_hash = hashlib.sha256(page_one.read_bytes()).hexdigest()
+
+        # Corrupt page 2 source
+        (self.project / "panels/p02-01/lettered.png").write_text("not an image", "utf-8")
+
+        with self.assertRaises(ValueError):
+            compose_all_pages(self.project)
+
+        # Page 1 must be unchanged
+        self.assertTrue(page_one.is_file())
+        self.assertEqual(
+            old_page_one_hash,
+            hashlib.sha256(page_one.read_bytes()).hexdigest(),
+        )
+        # No stale staging left behind
+        tx_base = self.project / "logs/transactions"
+        if tx_base.is_dir():
+            entries = list(tx_base.iterdir())
+            self.assertEqual(0, len(entries))
+
 
 if __name__ == "__main__":
     unittest.main()

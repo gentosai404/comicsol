@@ -12,7 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageOps
 
 from comic_sol import PAGE_HEIGHT, PAGE_WIDTH, atomic_write_bytes, read_json
-from project_io import contained_project_path
+from project_io import ProjectTransaction, contained_project_path
 
 
 def _storyboard_page(storyboard: dict, page_number: int) -> dict:
@@ -179,12 +179,21 @@ def compose_all_pages(project_dir: Path) -> list[Path]:
     if len(page_numbers) != len(pages) or page_numbers != list(range(1, len(pages) + 1)):
         raise ValueError("storyboard pages must be numbered contiguously from 1")
 
-    for number in page_numbers:
-        _page_sources(project_dir, _storyboard_page(storyboard, number), artifacts)
-    return [
-        compose_page(project_dir, number, storyboard, settings, artifacts)
+    prepared_pages = [
+        (number, _storyboard_page(storyboard, number), _page_sources(project_dir, _storyboard_page(storyboard, number), artifacts))
         for number in page_numbers
     ]
+    payloads = [
+        (f"pages/page-{number:03d}.png", _compose_to_bytes(project_dir, page, sources, settings))
+        for number, page, sources in prepared_pages
+    ]
+    output_paths = []
+    with ProjectTransaction(project_dir, "composition") as transaction:
+        for relative, payload in payloads:
+            transaction.stage_bytes(relative, payload)
+            output_paths.append(project_dir / relative)
+        transaction.commit()
+    return output_paths
 
 
 def compose_project(project_dir: Path) -> list[Path]:
