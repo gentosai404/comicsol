@@ -155,7 +155,7 @@ class McpProtocolTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual("PLANNED", transitioned["status"])
 
                     validated = await call("comic_validate", {
-                        "project_id": "sunlight-courier", "stage": "final",
+                        "project_id": "sunlight-courier", "stage": "panels",
                     })
                     self.assertEqual([], validated["result"])
                     resume = await call("comic_resume_plan", {

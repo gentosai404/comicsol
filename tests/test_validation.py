@@ -521,7 +521,12 @@ class ProjectValidationTests(unittest.TestCase):
 
         manifest.update({"status": "COMPLETE_WITH_WARNINGS", "warnings": [reason]})
         atomic_write_json(manifest_path, manifest)
-        self.assertEqual([], validate_project(self.project, "final"))
+        issues = validate_project(self.project, "final")
+        self.assertFalse(any(
+            issue.path == "project.json"
+            and issue.field in {"status", "warnings"}
+            for issue in issues
+        ), issues)
 
     def test_final_stage_reports_malformed_manifest_warnings_without_raising(self):
         self.add_panel_files()
