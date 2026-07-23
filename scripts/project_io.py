@@ -45,4 +45,3 @@ def contained_project_path(
     if candidate != root and root not in candidate.parents:
         raise ValueError("path escapes the project directory")
     return candidate
-
