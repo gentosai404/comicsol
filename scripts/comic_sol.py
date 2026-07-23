@@ -18,7 +18,7 @@ from typing import Literal
 
 from PIL import Image, ImageFont
 
-from project_io import contained_project_path, validate_source_bytes
+from project_io import contained_project_path, durable_atomic_write, validate_source_bytes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -159,30 +159,8 @@ def read_json(path: Path) -> dict[str, object]:
 
 
 def atomic_write_bytes(path: Path, payload: bytes) -> None:
-    """Atomically publish bytes through a flushed sibling temporary file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary_path = Path(handle.name)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink()
-            except FileNotFoundError:
-                pass
+    """Compatibility wrapper for durable artifact publication."""
+    durable_atomic_write(path, payload)
 
 
 def atomic_write_json(path: Path, value: object) -> None:

@@ -15,6 +15,7 @@ from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 
 from comic_sol import PAGE_HEIGHT, PAGE_WIDTH, read_json
+from project_io import durable_atomic_write
 from validate_project import validate_manifest
 
 
@@ -194,8 +195,7 @@ def export_pdf(project_dir: Path, output_path: Path | None = None) -> Path:
         with temporary_path.open("rb+") as handle:
             os.fsync(handle.fileno())
         _verify_written_pdf(temporary_path, pages)
-        os.replace(temporary_path, destination)
-        temporary_path = None
+        durable_atomic_write(destination, temporary_path.read_bytes())
         return destination
     except PdfExportError:
         raise

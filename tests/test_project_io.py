@@ -3,7 +3,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from scripts import project_io
 from scripts.project_io import contained_project_path
 
 
@@ -83,6 +85,79 @@ class ContainedProjectPathTests(unittest.TestCase):
             nested.resolve(),
             contained_project_path(self.project, "panels/image.png", must_exist=True),
         )
+
+
+class DurableWriteTests(unittest.TestCase):
+    def test_orders_write_flush_file_fsync_replace_and_directory_fsync(self):
+        events = []
+
+        class Handle:
+            name = "/temporary/output.tmp"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def write(self, payload):
+                events.append(("write", payload))
+
+            def flush(self):
+                events.append(("flush",))
+
+            def fileno(self):
+                return 17
+
+        destination = Path("/destination/output.bin")
+        with (
+            mock.patch.object(
+                project_io.tempfile, "NamedTemporaryFile", return_value=Handle()
+            ),
+            mock.patch.object(
+                project_io.os,
+                "fsync",
+                side_effect=lambda fd: events.append(("fsync", fd)),
+            ),
+            mock.patch.object(
+                project_io.os,
+                "replace",
+                side_effect=lambda source, target: events.append(
+                    ("replace", Path(source), target)
+                ),
+            ),
+            mock.patch.object(
+                project_io,
+                "fsync_directory",
+                side_effect=lambda path: events.append(("directory fsync", path)),
+            ),
+            mock.patch.object(Path, "mkdir"),
+        ):
+            project_io.durable_atomic_write(destination, b"payload")
+
+        self.assertEqual(
+            [
+                ("write", b"payload"),
+                ("flush",),
+                ("fsync", 17),
+                ("replace", Path("/temporary/output.tmp"), destination),
+                ("directory fsync", destination.parent),
+            ],
+            events,
+        )
+
+    def test_replace_failure_cleans_temporary_and_preserves_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            destination = directory / "artifact.bin"
+            destination.write_bytes(b"original")
+            with mock.patch.object(
+                project_io.os, "replace", side_effect=OSError("replace failed")
+            ):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    project_io.durable_atomic_write(destination, b"replacement")
+            self.assertEqual(b"original", destination.read_bytes())
+            self.assertEqual([destination], list(directory.iterdir()))
 
 
 if __name__ == "__main__":
