@@ -1139,7 +1139,6 @@ def promote_attempt(project_dir: Path, panel_id: str, attempt_path: Path) -> Pat
         raise ValueError("attempt path must be a retained file")
     if attempt_relative.is_absolute():
         attempt_relative = attempt.relative_to(project_dir.resolve(strict=True))
-    _contained_project_path(project_dir, attempt_relative)
     attempt = contained_project_path(project_dir, attempt_relative, must_exist=True)
     _verify_raster(attempt)
     destination = project_dir / f"panels/raw/{panel_id}.png"
