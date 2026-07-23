@@ -252,6 +252,10 @@ class ProjectTransaction:
         path = Path(relative)
         if path.is_absolute():
             raise ValueError("stage_bytes requires a relative path")
+        # Reject traversal and non-project-relative paths
+        resolved = contained_project_path(self.project_dir, relative)
+        if resolved.resolve() == self.project_dir.resolve():
+            raise ValueError(f"path '{relative}' resolves to the project root")
         dest = self.project_dir / path
         index = len(self._journal) + 1
         backup_name = f"backup-{index:03d}-{path.name}"
@@ -283,8 +287,10 @@ class ProjectTransaction:
         staging_paths: list[tuple[Path, bool]] = []
         try:
             for index, entry in enumerate(self._journal, start=1):
-                dest = self.project_dir / entry["path"]
-                staged = self._dir / f"staged-{index:03d}-{Path(entry['path']).name}"
+                dest = contained_project_path(self.project_dir, entry["path"])
+                staged = contained_project_path(
+                    self.project_dir, entry["staged"], must_exist=True
+                )
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staged, dest)
                 fsync_directory(dest.parent)
@@ -297,10 +303,15 @@ class ProjectTransaction:
                 for entry in self._journal:
                     if entry["path"] == str(Path(dest).relative_to(self.project_dir)):
                         if entry.get("backup"):
-                            backup = self.project_dir / entry["backup"]
+                            backup = contained_project_path(self.project_dir, entry["backup"])
                             if backup.is_file():
                                 os.replace(backup, dest)
                                 fsync_directory(dest.parent)
+                        else:
+                            try:
+                                dest.unlink()
+                            except OSError:
+                                pass
                         break
             self._phase = "rolled_back"
             self._write_journal()
@@ -377,13 +388,19 @@ class ProjectTransaction:
                     continue
                 if phase in ("staging", "publishing", "rolled_back"):
                     for entry in reversed(targets):
-                        dest = project_dir / entry["path"]
+                        dest = contained_project_path(project_dir, entry["path"])
                         backup_path = entry.get("backup")
                         if backup_path:
-                            backup = project_dir / backup_path
+                            backup = contained_project_path(project_dir, backup_path)
                             if backup.is_file():
                                 os.replace(backup, dest)
                                 fsync_directory(dest.parent)
+                        else:
+                            try:
+                                dest.unlink()
+                                fsync_directory(dest.parent)
+                            except OSError:
+                                pass
                 for child in tx_dir.iterdir():
                     try:
                         child.unlink()

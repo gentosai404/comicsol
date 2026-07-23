@@ -226,6 +226,84 @@ class ProjectTransactionTests(unittest.TestCase):
         self.assertEqual(b"old-one", (self.project / "pages/page-001.png").read_bytes())
         self.assertEqual(b"old-two", (self.project / "pages/page-002.png").read_bytes())
 
+    def test_rollback_removes_newly_created_targets_without_backup(self):
+        real_replace = project_io.os.replace
+        staged_calls = 0
+        def fail_second_publish(source, destination):
+            nonlocal staged_calls
+            if Path(source).name.startswith("staged-"):
+                staged_calls += 1
+                if staged_calls == 2:
+                    raise OSError("injected second publish failure")
+            return real_replace(source, destination)
+        with self.assertRaisesRegex(OSError, "injected second publish failure"):
+            with mock.patch.object(project_io.os, "replace", side_effect=fail_second_publish):
+                with project_io.ProjectTransaction(self.project, "composition") as transaction:
+                    transaction.stage_bytes("pages/page-003.png", b"new-page")
+                    transaction.stage_bytes("pages/page-004.png", b"another-new")
+                    transaction.commit()
+        self.assertFalse((self.project / "pages/page-003.png").exists())
+        self.assertFalse((self.project / "pages/page-004.png").exists())
+        self.assertEqual(b"old-one", (self.project / "pages/page-001.png").read_bytes())
+        self.assertEqual(b"old-two", (self.project / "pages/page-002.png").read_bytes())
+
+    def test_recover_removes_newly_created_targets_after_interrupted_first_composition(self):
+        (self.project / "pages/page-001.png").unlink()
+        (self.project / "pages/page-002.png").unlink()
+        real_replace = project_io.os.replace
+        calls = 0
+        def interrupt_after_first(source, destination):
+            nonlocal calls
+            source_path = Path(source)
+            if source_path.name.startswith("staged-"):
+                calls += 1
+                if calls == 1:
+                    raise KeyboardInterrupt("simulated interruption")
+            return real_replace(source, destination)
+        tx = project_io.ProjectTransaction(self.project, "first-composition")
+        tx.__enter__()
+        tx.stage_bytes("pages/page-001.png", b"page-one")
+        tx.stage_bytes("pages/page-002.png", b"page-two")
+        try:
+            with mock.patch.object(project_io.os, "replace", side_effect=interrupt_after_first):
+                tx.commit()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if tx._lock is not None:
+                tx._lock.__exit__(None, None, None)
+                tx._lock = None
+        project_io.ProjectTransaction.recover(self.project)
+        self.assertFalse((self.project / "pages/page-001.png").exists())
+        self.assertFalse((self.project / "pages/page-002.png").exists())
+
+    def test_stage_bytes_rejects_traversal(self):
+        with project_io.ProjectTransaction(self.project, "test") as transaction:
+            with self.assertRaises(ValueError):
+                transaction.stage_bytes("../outside.bin", b"escaped")
+            with self.assertRaises(ValueError):
+                transaction.stage_bytes("sub/../../../outside.bin", b"escaped")
+            with self.assertRaises(ValueError):
+                transaction.stage_bytes("C:outside.bin", b"drive-path")
+            with self.assertRaises(ValueError):
+                transaction.stage_bytes(r"\\server\share\file.bin", b"unc-path")
+        self.assertFalse((self.project.parent / "outside.bin").is_file())
+
+    def test_recover_rejects_malicious_journal_paths(self):
+        tx_dir = self.project / "logs/transactions/1"
+        tx_dir.mkdir(parents=True)
+        (tx_dir / "journal.json").write_text(
+            '{"operation":"composition","phase":"publishing",'
+            '"schema_version":"1.0","targets":['
+            '{"path":"../outside.bin","backup":null,'
+            '"staged":"logs/transactions/1/staged-001.bin"}]}'
+        )
+        outside = self.project.parent / "outside.bin"
+        outside.write_bytes(b"must-survive")
+        with self.assertRaises(ValueError):
+            project_io.ProjectTransaction.recover(self.project)
+        self.assertEqual(b"must-survive", outside.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
