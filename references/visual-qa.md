@@ -4,16 +4,21 @@ Inspect every generated raw panel against its storyboard, character/scene refere
 declared invariants. Record non-empty evidence for exactly seven ordered checks:
 
 1. `character-identity`: principal identity and all visible fingerprint invariants.
+   Evidence: short phrase (e.g. `"match"`, `"hair ok"`, `"eyes correct"`).
 2. `anatomy`: readable pose, hands, limbs, face, and no beat-breaking defects.
+   Evidence: short phrase (`"pose ok"`, `"hands visible"`, `"face correct"`).
 3. `action`: the scripted action and important props are present and correct.
+   Evidence: short phrase (`"present"`, `"props match"`, `"action correct"`).
 4. `composition`: camera, subject placement, focus, and reserved text-safe area work.
+   Evidence: short phrase (`"framing ok"`, `"text-safe clear"`).
 5. `continuity`: exact character and scene anchors match adjacent panels.
+   Evidence: short phrase (`"match prior"`, `"scene consistent"`).
 6. `text-free`: no generated dialogue, caption, speech bubbles, logos, signatures, or
    watermarks. Exact storyboard-authored SFX is allowed and required when authored;
    missing, misspelled, duplicated, or unauthorized SFX fails this check, and generated
-   SFX fails when none is authored.
+   SFX fails when none is authored. Evidence: short phrase (`"no text"`, `"sfx correct"`).
 7. `technical`: readable raster, minimum 512 px dimensions, aspect within ±2%, and no
-   unintended alpha.
+   unintended alpha. Evidence: short phrase (`"512+ px"`, `"ratio ok"`, `"no alpha"`).
 
 Results are `pass`, `warning`, or `fail`; severity is `warning` or `error`. Decisions are:
 

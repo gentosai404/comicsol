@@ -106,28 +106,28 @@ manifest, and the run continues toward `COMPLETE_WITH_WARNINGS` at the final tra
 Validate with `validate_project.py PROJECT_DIR --stage panels`, then transition through
 `PANELS_READY` and `QA_READY`.
 
-### 8. Normalize and letter
+### 8–10. Deterministic finalization (letter, compose, export, complete)
 
-Prepare clean panel files without semantic edits. Run `letter_panels.py PROJECT_DIR
-[--font PATH]`; inspect text placement and its summary. `text_count` is the
-backward-compatible authored total, `rendered_text_count` counts rendered dialogue and
-captions, and `sfx_count` counts validated authored SFX. Pillow must make no placement,
-overlap reservation, or pixel change for SFX. Transition to `LETTERED`.
+After the last panel is accepted and promoted, prefer one combined command:
 
-### 9. Compose and export
+```text
+python3.11 scripts/comic_sol.py finalize PROJECT_DIR
+```
 
-Run `compose_pages.py PROJECT_DIR --all`, inspect numeric page PNGs, transition to
-`COMPOSED`, run `export_pdf.py PROJECT_DIR`, then transition to `EXPORTED`. Missing panels
-or broken pages stop export without replacing a prior good output.
+`finalize` runs lettering, composition, PDF export, final validation, terminal
+transition, and report rendering without extra agent turns. Do not spawn subagents
+to re-audit results.
 
-### 10. Final QA and completion
+If `finalize` is unavailable, run the stages individually:
 
-Inspect composed pages and validate with `validate_project.py PROJECT_DIR --stage final`.
-Transition to `COMPLETE` with no unresolved warnings, `COMPLETE_WITH_WARNINGS` for
-accepted warning-level impact, or `BLOCKED` for any remaining error-level failure. If
-unresolved manifest warnings exist, requesting the final `COMPLETE` transition selects
-`COMPLETE_WITH_WARNINGS` automatically. Then run `render_report.py PROJECT_DIR` so its
-final-status projection matches the terminal manifest, and record the `export` cache.
+1. `letter_panels.py PROJECT_DIR [--font PATH]` then transition to `LETTERED`.
+   `text_count` is the authored total; `rendered_text_count` counts dialogue/captions;
+   `sfx_count` counts validated authored SFX. Pillow must not draw SFX.
+2. `compose_pages.py PROJECT_DIR --all`, inspect page PNGs, transition to `COMPOSED`.
+3. `export_pdf.py PROJECT_DIR`, transition to `EXPORTED`.
+4. `validate_project.py PROJECT_DIR --stage final`, then transition to `COMPLETE`,
+   `COMPLETE_WITH_WARNINGS`, or `BLOCKED`. Run `render_report.py PROJECT_DIR` last
+   and record the `export` cache.
 
 The success path is:
 

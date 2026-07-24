@@ -43,6 +43,50 @@ reporting to the bundled Python scripts.
    terminal status, then render the QA report so it projects that terminal status.
 7. Return status, counts, warnings, and clickable project output paths.
 
+## Token budget rules
+
+Apply these rules in every session to reduce token waste without reducing output quality.
+
+### Progressive loading
+
+Do not read all references at once. Load only the files needed for the current stage:
+
+- Read [workflow](references/workflow.md) immediately after input detection.
+- Read [creative direction](references/creative-direction.md) before writing plans.
+- Read [capability detection](references/capability-detection.md) just before generating.
+- Read [visual QA](references/visual-qa.md) just before inspecting panels.
+- Read [safety and IP](references/safety-ip.md) only when people, minors, or sensitive
+  content appear in the source.
+- Read [schemas](references/schemas.md) only when resolving a schema field ambiguity.
+
+### No subagents
+
+Do not spawn subagents, delegate, or fork for review, audit, or independent inspection.
+Perform all visual QA, final validation, and completion checks in the main agent thread.
+
+### Concise evidence
+
+Record QA evidence as a short keyword phrase (e.g. `"match"`, `"PASS"`, `"pose ok"`,
+`"hands visible"`, `"no text"`). Do not write long-form sentences such as
+`"Live panel visually reviewed against canonical reference and storyboard."`
+
+### Deterministic fallthrough
+
+After the last panel passes QA and is promoted, run the full deterministic pipeline
+with one combined command instead of per-stage turns:
+
+```text
+python3.11 scripts/comic_sol.py finalize PROJECT_DIR
+```
+
+When `finalize` is available, prefer it over manual `transition → letter → compose → export → validate → transition → report` turn-by-turn. When `finalize` is not available, use the `comic_finalize` MCP tool or stack the commands manually.
+
+### Completion response
+
+Report final status, pages, panels, generation/retry count, and unresolved warnings. Give
+clickable PDF path, page directory, manifest path, and QA report path. Do not spawn a
+subagent to audit results.
+
 ## Deterministic command route
 
 Use Python 3.11 from the skill root. Replace uppercase placeholders with resolved paths
