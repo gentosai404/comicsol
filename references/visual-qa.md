@@ -13,10 +13,12 @@ declared invariants. Record non-empty evidence for exactly seven ordered checks:
    Evidence: short phrase (`"framing ok"`, `"text-safe clear"`).
 5. `continuity`: exact character and scene anchors match adjacent panels.
    Evidence: short phrase (`"match prior"`, `"scene consistent"`).
-6. `text-free`: no generated dialogue, caption, speech bubbles, logos, signatures, or
-   watermarks. Exact storyboard-authored SFX is allowed and required when authored;
+6. `text-free`: no generated dialogue, caption, speech bubbles, logos, signatures,
+   watermarks, blank/white placeholder rectangles, or empty balloon-like shapes.
+   Exact storyboard-authored SFX is allowed and required when authored;
    missing, misspelled, duplicated, or unauthorized SFX fails this check, and generated
-   SFX fails when none is authored. Evidence: short phrase (`"no text"`, `"sfx correct"`).
+   SFX fails when none is authored. Evidence: short phrase (`"no text"`, `"sfx correct"`,
+   `"no placeholder"`).
 7. `technical`: readable raster, minimum 512 px dimensions, aspect within ±2%, and no
    unintended alpha. Evidence: short phrase (`"512+ px"`, `"ratio ok"`, `"no alpha"`).
 

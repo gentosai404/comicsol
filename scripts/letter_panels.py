@@ -640,7 +640,7 @@ def render_text_item(
     elif kind == "caption":
         draw.rectangle(
             (x0, y0, x1, y1),
-            fill=(255, 255, 255, 235), outline=(15, 15, 15, 255), width=2,
+            fill=(255, 255, 255, 200), outline=(15, 15, 15, 200), width=2,
         )
         assert layout is not None
         _draw_styled_layout(

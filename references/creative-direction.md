@@ -50,9 +50,10 @@ Write each preserved panel prompt in this exact order:
 7. Exact storyboard-authored SFX: when present, require the image model to draw every
    exact item once as dynamic motion/action typography integrated into the artwork.
    If no SFX is authored, prohibit generated SFX.
-8. Negative constraints: no generated dialogue, captions, or speech bubbles; no logos,
-   signatures, watermarks, unauthorized text/SFX, duplicated principal characters, or
-   avoid-trait drift.
+8. Negative constraints: no generated dialogue, captions, or speech bubbles; no
+   blank/white placeholder rectangles of any kind; no empty balloon-like shapes;
+   no logos, signatures, watermarks, unauthorized text/SFX, duplicated principal
+   characters, or avoid-trait drift.
 
 Request the storyboard rectangle's aspect ratio. Supply canonical references whenever the
 capability supports them; otherwise strengthen the unchanged text anchors and disclose
