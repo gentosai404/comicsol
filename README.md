@@ -213,69 +213,6 @@ For support, run `doctor`, retain the printed project path, and inspect
 restore the missing capability or correct the reported artifact, then ask Codex to
 resume that Comic Sol project.
 
-## Under-three-minute demo
-
-The judging demo is designed to finish under three minutes:
-
-1. Show the installed `comic-sol` skill and issue one natural-language request.
-2. Open the character bible, storyboard, one prompt, and seven-check panel QA.
-3. Show selective resume/repair, then the lettered panel and composed page PNGs.
-4. Open the comic PDF and `qa/report.md`; finish on the manifest status and paths.
-
-The following T12 evidence records the reviewed live run; no unreviewed variants or
-provider response payloads are included.
-
-### Verified live acceptance — July 18, 2026
-
-The accepted [`samples/sunlight-courier`](samples/sunlight-courier) project was
-created from the one-shot prompt shown above in a ChatGPT-authenticated Codex
-session using built-in `gpt-image-2` generation. It contains one canonical character
-reference, four reviewed panels, two composed pages, a two-page PDF, editable plans
-and prompts, seven-check QA records, the manifest, resume cache, and QA report. All
-four panels passed on their first generation attempt, so the run used 0 retries and
-finished `COMPLETE`.
-
-A second live run used the exact bytes of `tests/fixtures/demo-story.md`, produced
-four panels and two pages with 0 retries, validated at the final stage, and finished
-`COMPLETE`. It remains local because the committed courier sample is the concise
-judge artifact.
-
-The unavailable-capability rehearsal stopped after editable planning and
-storyboarding, wrote zero panel files, set `BLOCKED`, and emitted the exact preserved-
-project recovery error. Resuming reused the four reviewed courier panels and
-completed. A second resume returned 10 `reuse` actions and preserved the hashes and
-nanosecond mtimes of all 33 files exactly.
-
-The rendered demo is **1:46.905** (1920×1080, H.264/AAC), below the three-minute
-limit. It uses only committed Comic Sol artifacts and deterministic evidence. The
-`/feedback` command was run in the final Codex session and confirmed uploaded
-("Feedback uploaded. Thanks for the feedback!"), returning the real feedback
-Session ID (Thread ID): `019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.
-
-A fresh native Windows 11 clean-room run used Python 3.11.9, installed Pillow
-11.3.0 in a new virtual environment, cloned the public repository, passed `doctor`,
-and ran **137 tests successfully** (`OK`, one symlink-privilege test skipped). Linux/WSL
-also runs **137/137 tests successfully**.
-
-## Build Week evidence and pre-submission checklist
-
-Comic Sol was built with Codex and GPT-5.6 Sol for OpenAI Build Week 2026. Codex
-collaboration produced the design specification, implementation plan, TDD tests,
-deterministic scripts, portable agent workflow, and documentation. The committed
-history is the evidence trail; live acceptance evidence remains reserved for T12.
-
-Before submission:
-
-- Confirm all submitted work was created after the July 13, 2026 cutoff.
-- Make this a public repository and verify its clone/install flow while logged out.
-- Run the full suite and clean-room doctor on Linux or WSL and Windows.
-- Rehearse the demo and confirm its elapsed time is under three minutes.
-- Run `/feedback` in the final Codex session, verify the recorded real Session ID
-  resolves, and copy it into the submission materials. (Done: feedback uploaded;
-  Thread ID `019f7392-22ba-73f0-aa71-2d4a9cc1fdce`.)
-- Confirm the repository contains installation, invocation, testing, support,
-  privacy/IP, license, and limitation information but no private prompts or secrets.
-
 ## License
 
 Comic Sol's original code and documentation are available under the MIT License in

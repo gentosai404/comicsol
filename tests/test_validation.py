@@ -789,10 +789,7 @@ class PackagingTests(unittest.TestCase):
             "Pillow==11.3.0",
             "python3.11 -m unittest discover -s tests -v",
             "python3.11 scripts/comic_sol.py doctor",
-            "one natural-language",
-            "/feedback",
-            "under three minutes",
-            "GPT-5.6 Sol",
+            "One natural-language",
         ):
             self.assertIn(required, readme)
         self.assertNotRegex(readme.lower(), r"npm run|start the server|docker compose")
@@ -809,17 +806,6 @@ class PackagingTests(unittest.TestCase):
             "tests/fixtures/valid-one-page", "No build service",
         ):
             self.assertIn(phrase, readme)
-
-    def test_build_week_evidence_and_feedback_procedure_are_explicit(self):
-        readme = self.readme()
-        for phrase in (
-            "public repository", "logged out", "July 13, 2026",
-            "Codex", "GPT-5.6 Sol", "Session ID", "pre-submission",
-            "under three minutes", "external provider policies",
-        ):
-            self.assertIn(phrase, readme)
-        self.assertRegex(readme, r"(?s)/feedback.*Session ID")
-        self.assertNotRegex(readme, r"Session ID:\s*[A-Za-z0-9_-]{8,}")
 
     def test_project_and_font_licenses_remain_distinct(self):
         license_text = (ROOT / "LICENSE").read_text("utf-8")
