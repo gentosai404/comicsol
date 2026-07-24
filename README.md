@@ -73,8 +73,10 @@ That is the complete user invocation. Comic Sol detects prompt, pasted-story,
 source-file, or resume mode; applies documented defaults; and asks only materially
 missing questions. It reports an explicit error if the agent session cannot return
 a local raster image. See
-[`references/capability-detection.md`](references/capability-detection.md) for the
-exact capability check and preserved-project recovery procedure.
+See [`references/capability-detection.md`](references/capability-detection.md) for the
+exact capability check and preserved-project recovery procedure. Platform-specific
+image-provider setup is documented in
+[`references/image-provider-setup.md`](references/image-provider-setup.md).
 
 For deterministic diagnostics:
 

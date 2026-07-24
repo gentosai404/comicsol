@@ -1,5 +1,8 @@
 # Image capability detection
 
+> **Platform setup:** See [`image-provider-setup.md`](image-provider-setup.md) for
+> concrete steps per platform (Codex, Claude Desktop, Cline, Hermes).
+
 Capability detection belongs to the agent plane, not deterministic Python.
 
 1. Inspect only the skills/tools exposed in the current session for text-to-image or a

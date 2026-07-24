@@ -522,12 +522,24 @@ def _ellipse_tail_polygon(
     scale = 1 / math.sqrt((delta_x / radius_x) ** 2 + (delta_y / radius_y) ** 2)
     attachment_x = center_x + delta_x * scale
     attachment_y = center_y + delta_y * scale
+    # Clamp tail length so it never exceeds 3× the ellipse's minor radius.
+    # Prevents the tail from stretching across the entire panel.
+    max_tail = max(1.0, min(radius_x, radius_y) * 3)
+    dir_x = target_x - attachment_x
+    dir_y = target_y - attachment_y
+    dist = math.hypot(dir_x, dir_y)
+    if dist > max_tail:
+        clamped_x = round(attachment_x + dir_x / dist * max_tail)
+        clamped_y = round(attachment_y + dir_y / dist * max_tail)
+    else:
+        clamped_x = round(target_x)
+        clamped_y = round(target_y)
     length = math.hypot(delta_x, delta_y)
     tangent_x, tangent_y = -delta_y / length, delta_x / length
     half_base = max(8.0, min(radius_x, radius_y) * 0.18)
     base_one = (attachment_x + tangent_x * half_base, attachment_y + tangent_y * half_base)
     base_two = (attachment_x - tangent_x * half_base, attachment_y - tangent_y * half_base)
-    return base_one, base_two, (target_x, target_y)
+    return base_one, base_two, (clamped_x, clamped_y)
 
 
 def _item_font(
