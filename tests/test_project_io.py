@@ -7,6 +7,7 @@ from unittest import mock
 
 from scripts import project_io
 from scripts.project_io import contained_project_path
+from tests.support import make_symlink
 
 
 class ContainedProjectPathTests(unittest.TestCase):
@@ -29,7 +30,9 @@ class ContainedProjectPathTests(unittest.TestCase):
                     contained_project_path(self.project, bad)
 
     def test_nonexistent_contained_target_obeys_must_exist(self):
-        expected = self.project / "panels/new.png"
+        # contained_project_path returns a resolved path, and the temp root is
+        # itself a symlink on macOS (/var -> /private/var).
+        expected = self.project.resolve() / "panels/new.png"
         self.assertEqual(expected, contained_project_path(self.project, "panels/new.png"))
         with self.assertRaises(FileNotFoundError):
             contained_project_path(self.project, "panels/new.png", must_exist=True)
@@ -44,10 +47,7 @@ class ContainedProjectPathTests(unittest.TestCase):
         outside = self.root / "outside.png"
         outside.write_bytes(b"outside")
         link = self.project / "linked.png"
-        try:
-            link.symlink_to(outside)
-        except OSError as error:
-            self.skipTest(f"symlink unavailable: {error}")
+        make_symlink(self, link, outside)
         with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
             contained_project_path(self.project, "linked.png", must_exist=True)
 
@@ -55,10 +55,7 @@ class ContainedProjectPathTests(unittest.TestCase):
         outside = self.root / "outside"
         outside.mkdir()
         link = self.project / "panels"
-        try:
-            link.symlink_to(outside, target_is_directory=True)
-        except OSError as error:
-            self.skipTest(f"symlink unavailable: {error}")
+        make_symlink(self, link, outside, directory=True)
         with self.assertRaisesRegex(ValueError, "escapes|symlinks"):
             contained_project_path(self.project, "panels/image.png")
 

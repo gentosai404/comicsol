@@ -12,6 +12,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from tests.support import make_symlink  # noqa: E402
+
 MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
 
 if MCP_AVAILABLE:
@@ -65,10 +67,7 @@ class McpServerUnitTests(unittest.TestCase):
     def test_project_symlink_cannot_escape_root(self):
         outside = Path(self.temporary_directory.name) / "outside"
         outside.mkdir()
-        try:
-            (self.root / "escape").symlink_to(outside, target_is_directory=True)
-        except OSError as error:
-            self.skipTest(f"symlink unavailable: {error}")
+        make_symlink(self, self.root / "escape", outside, directory=True)
 
         with self.assertRaisesRegex(ToolError, "outside output root"):
             mcp_server._resolve_project("escape")
@@ -78,10 +77,7 @@ class McpServerUnitTests(unittest.TestCase):
         project.mkdir()
         outside = Path(self.temporary_directory.name) / "secret.txt"
         outside.write_text("outside output root")
-        try:
-            (project / "arbitrary-file.txt").symlink_to(outside)
-        except OSError as error:
-            self.skipTest(f"symlink unavailable: {error}")
+        make_symlink(self, project / "arbitrary-file.txt", outside)
 
         with self.assertRaisesRegex(ToolError, "symlink"):
             mcp_server._resolve_project("project")
@@ -234,22 +230,22 @@ class McpProtocolTests(unittest.IsolatedAsyncioTestCase):
                 if p.is_file():
                     p.unlink()
 
-            # Install page-QA records with correct hashes.
-            qa_pages = project / "qa/pages"
-            qa_pages.mkdir(parents=True, exist_ok=True)
-            for page_number in (1, 2):
-                page_path = project / f"pages/page-{page_number:03d}.png"
-                page_hash = hashlib.sha256(page_path.read_bytes()).hexdigest()
-                record = {
-                    "page": page_number,
-                    "page_path": f"pages/page-{page_number:03d}.png",
-                    "page_sha256": page_hash,
-                    "schema_version": "1.0",
-                    "status": "reviewed",
-                }
-                (qa_pages / f"page-{page_number:03d}.json").write_text(
-                    json.dumps(record, indent=2, sort_keys=True) + "\n", "utf-8"
-                )
+            def write_page_qa_records():
+                """Record review of the pages as they currently exist on disk."""
+                qa_pages = project / "qa/pages"
+                qa_pages.mkdir(parents=True, exist_ok=True)
+                for page_number in (1, 2):
+                    page_path = project / f"pages/page-{page_number:03d}.png"
+                    record = {
+                        "page": page_number,
+                        "page_path": f"pages/page-{page_number:03d}.png",
+                        "page_sha256": hashlib.sha256(page_path.read_bytes()).hexdigest(),
+                        "schema_version": "1.0",
+                        "status": "reviewed",
+                    }
+                    (qa_pages / f"page-{page_number:03d}.json").write_text(
+                        json.dumps(record, indent=2, sort_keys=True) + "\n", "utf-8"
+                    )
 
             parameters = StdioServerParameters(
                 command=sys.executable,
@@ -258,6 +254,15 @@ class McpProtocolTests(unittest.IsolatedAsyncioTestCase):
             async with stdio_client(parameters) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
+
+                    # The documented two-pass flow: the first call letters and
+                    # composes, then fails closed on the page-QA gate. Hashing
+                    # the committed sample pages up front would not work, since
+                    # recomposition re-encodes pixel-identical PNGs whose bytes
+                    # differ by platform zlib.
+                    blocked = await session.call_tool("comic_finalize", {"project_id": "sunlight-courier"})
+                    self.assertTrue(blocked.isError, "comic_finalize must gate on page QA")
+                    write_page_qa_records()
 
                     result = await session.call_tool("comic_finalize", {"project_id": "sunlight-courier"})
                     self.assertFalse(result.isError, "comic_finalize")
