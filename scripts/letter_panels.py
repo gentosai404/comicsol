@@ -542,9 +542,10 @@ def _ellipse_tail_polygon(
     scale = 1 / math.sqrt((delta_x / radius_x) ** 2 + (delta_y / radius_y) ** 2)
     attachment_x = center_x + delta_x * scale
     attachment_y = center_y + delta_y * scale
-    # Clamp tail length so it never exceeds 3× the ellipse's minor radius.
-    # Prevents the tail from stretching across the entire panel.
-    max_tail = max(1.0, min(radius_x, radius_y) * 3)
+    # Clamp tail length twice: relative to the balloon and to the panel.
+    # A tail is a pointer, not a leash — an unclamped tail crosses faces.
+    minor_radius = min(radius_x, radius_y)
+    max_tail = max(1.0, min(minor_radius * 1.2, min(image_width, image_height) * 0.12))
     dir_x = target_x - attachment_x
     dir_y = target_y - attachment_y
     dist = math.hypot(dir_x, dir_y)
