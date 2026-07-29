@@ -38,9 +38,11 @@ py -3.11 -m pip install -r requirements.txt
 Supported environments are Linux, macOS, Windows, and WSL with Python 3.11 and
 Pillow 12.3.0. The deterministic test suite does not need an image provider.
 
-## Native Hermes MCP Server (Optional)
+## MCP Server (Optional)
 
 Comic Sol includes an optional `stdio` MCP server that exposes the deterministic pipeline as standard tools for Hermes Agent, Claude Desktop, Cursor, or any MCP client.
+
+Sampling should remain disabled to preserve deterministic execution.
 
 To run the MCP adapter, install the SDK alongside Pillow:
 
@@ -73,7 +75,7 @@ That is the complete user invocation. Comic Sol detects prompt, pasted-story,
 source-file, or resume mode; applies documented defaults; and asks only materially
 missing questions. It reports an explicit error if the agent session cannot return
 a local raster image. See
-See [`references/capability-detection.md`](references/capability-detection.md) for the
+[`references/capability-detection.md`](references/capability-detection.md) for the
 exact capability check and preserved-project recovery procedure. Platform-specific
 image-provider setup is documented in
 [`references/image-provider-setup.md`](references/image-provider-setup.md).
