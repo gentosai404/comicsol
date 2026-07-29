@@ -384,6 +384,47 @@ class LetteringTests(unittest.TestCase):
 
         self.assertEqual((255, 255, 255), image.getpixel(attachment))
 
+    def test_dialogue_uses_uppercase_comic_lettering_without_mutating_authored_text(self):
+        item = dialogue("Wait, did you call me Peter?")
+        original = item["content"]
+        image = Image.new("RGB", (600, 320), (28, 32, 40))
+        draw = ImageDraw.Draw(image)
+        captured_runs = []
+
+        def capture_runs(_draw, runs, _position, _fill):
+            captured_runs.extend(runs)
+
+        with mock.patch("letter_panels._draw_font_runs", side_effect=capture_runs):
+            render_text_item(
+                draw,
+                item,
+                {"x": 30, "y": 20, "width": 420, "height": 250},
+                ImageFont.truetype(str(FONT), 32),
+                self.characters,
+            )
+
+        self.assertEqual(original, item["content"])
+        self.assertEqual(
+            "WAIT,DIDYOUCALLMEPETER?",
+            "".join(text for text, _ in captured_runs).replace(" ", ""),
+        )
+
+    def test_dialogue_tail_is_a_short_pointer_not_a_cross_panel_leash(self):
+        from letter_panels import _ellipse_tail_polygon
+
+        rect = {"x": 40, "y": 30, "width": 240, "height": 160}
+        base_one, base_two, tip = _ellipse_tail_polygon(rect, [1.0, 1.0], 800, 1000)
+        attachment = (
+            (base_one[0] + base_two[0]) / 2,
+            (base_one[1] + base_two[1]) / 2,
+        )
+        tail_length = math.hypot(tip[0] - attachment[0], tip[1] - attachment[1])
+
+        # Reference-style tails stay near the balloon instead of crossing the
+        # central face/action zone.
+        self.assertLessEqual(tail_length, rect["height"] * 0.30 + 1)
+        self.assertLessEqual(tail_length, min(800, 1000) * 0.05 + 1)
+
     def test_dialogue_uses_adaptive_oval_and_boundary_tail_geometry(self):
         from letter_panels import (
             _ellipse_tail_polygon,
@@ -441,34 +482,14 @@ class LetteringTests(unittest.TestCase):
         self.assertAlmostEqual(expected_attachment[1], attachment[1], delta=1.0)
         self.assertNotIn(center, (base_one, base_two, target))
 
-        calls = []
-        original_line = draw.line
-        original_polygon = draw.polygon
-        original_ellipse = draw.ellipse
-
-        def record_line(*args, **kwargs):
-            calls.append("line")
-            return original_line(*args, **kwargs)
-
-        def record_polygon(*args, **kwargs):
-            calls.append("polygon")
-            return original_polygon(*args, **kwargs)
-
-        def record_ellipse(*args, **kwargs):
-            calls.append("ellipse")
-            return original_ellipse(*args, **kwargs)
-
-        with (
-            mock.patch.object(draw, "line", side_effect=record_line),
-            mock.patch.object(draw, "polygon", side_effect=record_polygon),
-            mock.patch.object(draw, "ellipse", side_effect=record_ellipse),
-        ):
+        with mock.patch(
+            "letter_panels._draw_antialiased_balloon",
+            wraps=__import__("letter_panels")._draw_antialiased_balloon,
+        ) as balloon_draw:
             render_text_item(draw, short, short_rect, short_font, self.characters)
 
-        self.assertNotIn("line", calls)
-        self.assertIn("polygon", calls)
-        self.assertIn("ellipse", calls)
-        self.assertLess(calls.index("polygon"), calls.index("ellipse"))
+        balloon_draw.assert_called_once()
+        self.assertIsNotNone(balloon_draw.call_args.args[2])
         self.assertEqual((28, 32, 40), image.getpixel((short_rect["x"] + 2, short_rect["y"] + 2)))
         self.assertGreater(min(image.getpixel((short_rect["x"] + short_rect["width"] // 2, short_rect["y"] + 6))), 220)
 

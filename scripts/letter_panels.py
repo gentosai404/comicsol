@@ -45,6 +45,7 @@ CAPTION_PADDING = 20
 # Panels are page-sized at most (1600x2400); sixteen page areas leaves room for
 # oversampled source art while rejecting decompression bombs.
 MAX_DECODED_PIXELS = 1600 * 2400 * 16
+BALLOON_SUPERSAMPLE = 4
 
 
 def normalize_content(text: str) -> str:
@@ -58,6 +59,12 @@ def normalize_content(text: str) -> str:
     )
     lines = [re.sub(r"[^\S\n]+", " ", line).strip() for line in normalized.split("\n")]
     return "\n".join(lines).strip()
+
+
+def _display_content(kind: object, text: str) -> str:
+    """Return display text without modifying the authored storyboard value."""
+    normalized = normalize_content(text)
+    return normalized.upper() if kind == "dialogue" else normalized
 
 
 def normalized_word_count(text: str) -> int:
@@ -391,7 +398,12 @@ def _draw_font_runs(
     """Draw one line of mixed-font runs from a shared baseline."""
     x, y = position
     for text, run_font in runs:
-        draw.text((x, y), text, font=run_font, fill=fill, anchor="ls")
+        # One-pixel keyline gives Comic Neue the confident ink weight used by
+        # print-comic dialogue without changing measured glyph advances.
+        draw.text(
+            (x, y), text, font=run_font, fill=fill, anchor="ls",
+            stroke_width=1, stroke_fill=fill,
+        )
         x += draw.textlength(text, font=run_font)
 
 
@@ -490,7 +502,7 @@ def _fitted_item_rect(
         return dict(maximum)
     layout = _layout_styled_text(
         draw,
-        normalize_content(item.get("content", "")),
+        _display_content(kind, item.get("content", "")),
         font,
         _text_wrap_width(kind, maximum["width"]),
         emphasis=kind == "dialogue",
@@ -542,10 +554,16 @@ def _ellipse_tail_polygon(
     scale = 1 / math.sqrt((delta_x / radius_x) ** 2 + (delta_y / radius_y) ** 2)
     attachment_x = center_x + delta_x * scale
     attachment_y = center_y + delta_y * scale
-    # Clamp tail length twice: relative to the balloon and to the panel.
-    # A tail is a pointer, not a leash — an unclamped tail crosses faces.
+    # A tail is a short pointer, not a leash across faces or focal action.
     minor_radius = min(radius_x, radius_y)
-    max_tail = max(1.0, min(minor_radius * 1.2, min(image_width, image_height) * 0.12))
+    max_tail = max(
+        1.0,
+        min(
+            minor_radius * 0.65,
+            rect["height"] * 0.30,
+            min(image_width, image_height) * 0.05,
+        ),
+    )
     dir_x = target_x - attachment_x
     dir_y = target_y - attachment_y
     dist = math.hypot(dir_x, dir_y)
@@ -557,10 +575,53 @@ def _ellipse_tail_polygon(
         clamped_y = round(target_y)
     length = math.hypot(delta_x, delta_y)
     tangent_x, tangent_y = -delta_y / length, delta_x / length
-    half_base = max(8.0, min(radius_x, radius_y) * 0.18)
+    half_base = max(5.0, min(radius_x, radius_y) * 0.10)
     base_one = (attachment_x + tangent_x * half_base, attachment_y + tangent_y * half_base)
     base_two = (attachment_x - tangent_x * half_base, attachment_y - tangent_y * half_base)
     return base_one, base_two, (clamped_x, clamped_y)
+
+
+def _draw_antialiased_balloon(
+    draw: ImageDraw.ImageDraw,
+    bounds: tuple[int, int, int, int],
+    tail: tuple[tuple[float, float], tuple[float, float], tuple[int, int]] | None,
+) -> None:
+    """Draw one seamless supersampled balloon and composite it onto the panel."""
+    image = draw._image
+    scale = BALLOON_SUPERSAMPLE
+    image_width, image_height = image.size
+    x0, y0, x1, y1 = bounds
+    points = [(float(x0), float(y0)), (float(x1), float(y1))]
+    if tail is not None:
+        points.extend((float(x), float(y)) for x, y in tail)
+    margin = 5
+    left = max(0, math.floor(min(x for x, _ in points)) - margin)
+    top = max(0, math.floor(min(y for _, y in points)) - margin)
+    right = min(image_width, math.ceil(max(x for x, _ in points)) + margin + 1)
+    bottom = min(image_height, math.ceil(max(y for _, y in points)) + margin + 1)
+    mask = Image.new("L", ((right - left) * scale, (bottom - top) * scale), 0)
+    mask_draw = ImageDraw.Draw(mask)
+
+    def scaled_point(point: tuple[float, float]) -> tuple[int, int]:
+        return round((point[0] - left) * scale), round((point[1] - top) * scale)
+
+    if tail is not None:
+        mask_draw.polygon(tuple(scaled_point(point) for point in tail), fill=255)
+    mask_draw.ellipse(
+        ((x0 - left) * scale, (y0 - top) * scale,
+         (x1 - left) * scale, (y1 - top) * scale),
+        fill=255,
+    )
+
+    # Expand the merged silhouette before downsampling. This avoids the seam,
+    # doubled edge, and jagged notch produced by outlining two separate shapes.
+    outline = mask.filter(ImageFilter.MaxFilter(25))
+    resample = Image.Resampling.LANCZOS
+    local_size = (right - left, bottom - top)
+    mask = mask.resize(local_size, resample)
+    outline = outline.resize(local_size, resample)
+    image.paste((15, 15, 15, 255), (left, top), outline)
+    image.paste((255, 255, 255, 255), (left, top), mask)
 
 
 def _item_font(
@@ -569,7 +630,7 @@ def _item_font(
     rect: dict[str, int],
 ) -> ImageFont.FreeTypeFont:
     kind = item.get("kind")
-    content = normalize_content(item.get("content", ""))
+    content = _display_content(kind, item.get("content", ""))
     for size in range(42, 23, -2):
         font = _load_font(size)
         layout = _layout_styled_text(
@@ -600,7 +661,7 @@ def render_text_item(
 ) -> None:
     """Draw one validated text item inside an explicit bounded rectangle."""
     kind = item.get("kind")
-    content = normalize_content(item.get("content", ""))
+    content = _display_content(kind, item.get("content", ""))
     if not content:
         raise ValueError(f"text item {item.get('id', 'unknown')} has empty content")
     if kind not in {"dialogue", "caption", "sfx"}:
@@ -634,26 +695,12 @@ def render_text_item(
     if kind == "dialogue":
         tail = item.get("tail_target")
         if isinstance(tail, list) and len(tail) == 2 and all(isinstance(value, (int, float)) for value in tail):
-            base_one, base_two, target = _ellipse_tail_polygon(
+            tail_polygon = _ellipse_tail_polygon(
                 bounded | {"x": x0, "y": y0}, tail, image_width, image_height
             )
-            silhouette = Image.new("L", (image_width, image_height), 0)
-            silhouette_draw = ImageDraw.Draw(silhouette)
-            silhouette_draw.polygon((base_one, base_two, target), fill=255)
-            silhouette_draw.ellipse((x0, y0, x1, y1), fill=255)
-            draw.polygon(
-                (base_one, base_two, target),
-                fill=(255, 255, 255, 255),
-            )
-            draw.ellipse((x0, y0, x1, y1), fill=(255, 255, 255, 255))
-            outline = silhouette.filter(ImageFilter.MaxFilter(7))
-            outline.paste(0, (0, 0), silhouette)
-            draw.bitmap((0, 0), outline, fill=(15, 15, 15, 255))
+            _draw_antialiased_balloon(draw, (x0, y0, x1, y1), tail_polygon)
         else:
-            draw.ellipse(
-                (x0, y0, x1, y1),
-                fill=(255, 255, 255, 255), outline=(15, 15, 15, 255), width=3,
-            )
+            _draw_antialiased_balloon(draw, (x0, y0, x1, y1), None)
         assert layout is not None
         _draw_styled_layout(
             draw,
