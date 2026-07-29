@@ -419,11 +419,51 @@ class LetteringTests(unittest.TestCase):
             (base_one[1] + base_two[1]) / 2,
         )
         tail_length = math.hypot(tip[0] - attachment[0], tip[1] - attachment[1])
+        tail_base = math.hypot(
+            base_two[0] - base_one[0],
+            base_two[1] - base_one[1],
+        )
 
         # Reference-style tails stay near the balloon instead of crossing the
         # central face/action zone.
-        self.assertLessEqual(tail_length, rect["height"] * 0.30 + 1)
-        self.assertLessEqual(tail_length, min(800, 1000) * 0.05 + 1)
+        self.assertGreaterEqual(tail_length, 12)
+        self.assertLessEqual(tail_length, rect["height"] * 0.35 + 1)
+        self.assertLessEqual(tail_length, min(800, 1000) * 0.055 + 1)
+        self.assertGreaterEqual(tail_base / tail_length, 0.65)
+
+    def test_tail_target_inside_balloon_still_produces_visible_outward_pointer(self):
+        from letter_panels import _ellipse_tail_polygon
+
+        rect = {"x": 100, "y": 100, "width": 240, "height": 160}
+        base_one, base_two, tip = _ellipse_tail_polygon(rect, [0.28, 0.22], 800, 1000)
+        attachment = (
+            (base_one[0] + base_two[0]) / 2,
+            (base_one[1] + base_two[1]) / 2,
+        )
+        center = (rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2)
+        outward = (attachment[0] - center[0], attachment[1] - center[1])
+        pointer = (tip[0] - attachment[0], tip[1] - attachment[1])
+
+        self.assertGreater(outward[0] * pointer[0] + outward[1] * pointer[1], 0)
+        self.assertGreaterEqual(math.hypot(*pointer), 12)
+
+    def test_single_line_dialogue_balloon_is_compact_but_contains_text(self):
+        from letter_panels import _balloon_box, _layout_styled_text
+
+        image = Image.new("RGB", (800, 1000), (28, 32, 40))
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype(str(FONT), 42)
+        layout = _layout_styled_text(draw, "KALIAN... AMAN...", font, 400)
+        self.assertIsNotNone(layout)
+        width, height = _balloon_box(layout)
+
+        self.assertEqual(1, len(layout.lines))
+        self.assertLessEqual(width, math.ceil(layout.width * math.sqrt(2)) + 42)
+        self.assertLessEqual(height, math.ceil(layout.height * math.sqrt(2)) + 38)
+        self.assertLessEqual(
+            (layout.width / width) ** 2 + (layout.height / height) ** 2,
+            1.0,
+        )
 
     def test_dialogue_uses_adaptive_oval_and_boundary_tail_geometry(self):
         from letter_panels import (
@@ -449,7 +489,7 @@ class LetteringTests(unittest.TestCase):
 
         self.assertLess(short_rect["width"], maximum["width"])
         self.assertLess(short_rect["height"], maximum["height"])
-        self.assertGreaterEqual(short_rect["height"], short_layout.height + 48)
+        self.assertGreaterEqual(short_rect["height"], short_layout.height + 36)
         self.assertGreater(long_rect["width"] * long_rect["height"], short_rect["width"] * short_rect["height"])
         self.assertGreaterEqual(short_rect["x"], maximum["x"])
         self.assertGreaterEqual(short_rect["y"], maximum["y"])

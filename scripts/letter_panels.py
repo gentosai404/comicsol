@@ -40,7 +40,7 @@ ANCHORS = (
 # A w x h text block only fits inside an ellipse whose axes are at least
 # sqrt(2) times w and h, so balloons budget and circumscribe text with it.
 ELLIPSE_TEXT_RATIO = math.sqrt(2.0)
-BALLOON_PADDING = 28
+BALLOON_PADDING = 19
 CAPTION_PADDING = 20
 # Panels are page-sized at most (1600x2400); sixteen page areas leaves room for
 # oversampled source art while rejecting decompression bombs.
@@ -559,23 +559,38 @@ def _ellipse_tail_polygon(
     max_tail = max(
         1.0,
         min(
-            minor_radius * 0.65,
-            rect["height"] * 0.30,
-            min(image_width, image_height) * 0.05,
+            minor_radius * 0.75,
+            rect["height"] * 0.35,
+            min(image_width, image_height) * 0.055,
         ),
     )
-    dir_x = target_x - attachment_x
-    dir_y = target_y - attachment_y
-    dist = math.hypot(dir_x, dir_y)
-    if dist > max_tail:
-        clamped_x = round(attachment_x + dir_x / dist * max_tail)
-        clamped_y = round(attachment_y + dir_y / dist * max_tail)
-    else:
-        clamped_x = round(target_x)
-        clamped_y = round(target_y)
     length = math.hypot(delta_x, delta_y)
+    unit_x, unit_y = delta_x / length, delta_y / length
+    # The authored target can land inside a fitted balloon after wrapping. In
+    # that case target→attachment points inward and the tail disappears under
+    # the white fill. Always extend outward along the speaker ray and preserve
+    # a visible minimum while retaining the strict upper bounds above.
+    target_projection = (
+        (target_x - attachment_x) * unit_x
+        + (target_y - attachment_y) * unit_y
+    )
+    desired_tail = (
+        target_projection
+        if target_projection > 0
+        else minor_radius * 0.35
+    )
+    tail_length = min(max_tail, max(12.0, desired_tail))
+    clamped_x = round(attachment_x + unit_x * tail_length)
+    clamped_y = round(attachment_y + unit_y * tail_length)
     tangent_x, tangent_y = -delta_y / length, delta_x / length
-    half_base = max(5.0, min(radius_x, radius_y) * 0.10)
+    # Use a broad comic-print wedge rather than a needle-like spike. Keep the
+    # base proportional to the balloon while the independently capped length
+    # prevents it from crossing faces or focal action.
+    half_base = max(
+        7.0,
+        min(radius_x, radius_y) * 0.18,
+        tail_length * 0.34,
+    )
     base_one = (attachment_x + tangent_x * half_base, attachment_y + tangent_y * half_base)
     base_two = (attachment_x - tangent_x * half_base, attachment_y - tangent_y * half_base)
     return base_one, base_two, (clamped_x, clamped_y)
