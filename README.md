@@ -1,6 +1,6 @@
 # Comic Sol
 
-Comic Sol is a pure installable Codex Skill that turns a short prompt, pasted story,
+Comic Sol is an installable Codex Skill and portable Python CLI that turns a short prompt, pasted story,
 or `.txt`/`.md` file into an original manga/anime comic. One natural-language
 invocation drives planning, character consistency, image generation, visual QA,
 selective repair, deterministic lettering and composition, and PDF export. It is
@@ -22,9 +22,9 @@ cd "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
 python3.11 -m pip install -r requirements.txt
 ```
 
-The host-agnostic rule is: install this repository as one `comic-sol` folder beneath
-the Codex skills directory configured by your Codex installation. Keep `SKILL.md`,
-`scripts/`, `references/`, `templates/`, and `assets/` together.
+The host-agnostic rule is: clone or copy this repository as one `comic-sol` folder
+beneath the Codex skills directory configured by your Codex installation. Keep
+`SKILL.md`, `scripts/`, `references/`, `templates/`, and `assets/` together.
 
 Windows PowerShell:
 
@@ -37,6 +37,18 @@ py -3.11 -m pip install -r requirements.txt
 
 Supported environments are Linux, macOS, Windows, and WSL with Python 3.11 and
 Pillow 12.3.0. The deterministic test suite does not need an image provider.
+
+Install the portable CLI from a checkout and verify the bundled deterministic
+engine, fonts, and templates:
+
+```bash
+python3.11 -m pip install .
+comic-sol --json doctor
+```
+
+The CLI currently exposes `doctor`, `init`, `status`, `validate`, `resume`,
+`finalize`, and the optional `mcp` launcher. Machine-readable responses use one
+stable envelope containing `ok`, `command`, `data`, and `error`.
 
 ## MCP Server (Optional)
 
@@ -59,11 +71,42 @@ OUTPUT_ROOT="$(pwd)/comic-sol-output"
 python3.11 scripts/mcp_server.py --root "$OUTPUT_ROOT"
 ```
 
-For an MCP client configuration, resolve `python3.11`, `scripts/mcp_server.py`, and
-the selected output root to absolute paths from the current checkout. Do not copy
-paths from another machine. A portable installed CLI is not available yet. Disable
-sampling and lock the server to that output root. The server exposes the full
-deterministic lifecycle as 17 `comic_*` tools.
+For an MCP client configuration, lock the server to one absolute output root and
+keep sampling disabled. An installed package uses the stable launcher:
+
+```bash
+python3.11 -m pip install '.[mcp]'
+comic-sol mcp --root /absolute/path/to/comic-sol-output
+```
+
+Transactional client integration is available through:
+
+```bash
+comic-sol --json setup --output-root /absolute/path/to/comic-sol-output
+comic-sol --json repair --output-root /absolute/path/to/comic-sol-output
+comic-sol --json uninstall --output-root /absolute/path/to/comic-sol-output
+```
+
+Setup refuses malformed native config, creates a timestamped backup before each
+change, writes atomically, and restores the original bytes if verification fails.
+Repeated setup is idempotent. Uninstall removes only the MCP integration and
+preserves comic projects. Codex TOML and detected JSON client configs are mutated
+only at verified locations; clients whose native format or location has not been
+verified are reported as `unsupported` rather than guessed.
+
+During source development, `python3.11 scripts/mcp_server.py --root PATH` remains
+available. Both entry points expose the same protocol-tested deterministic lifecycle
+as exactly 17 `comic_*` tools.
+
+## Provider contract
+
+Image-provider integrations implement the immutable `GenerationProvider` protocol
+from `comic_sol_product.providers`. Requests record only prompt hashes, dimensions,
+relative references, and optional provider/model/seed identifiers. Results retain
+only allowlisted metadata plus raster bytes and SHA-256; credentials and raw provider
+payloads are never accepted into the contract. The base package includes no HTTP or
+provider SDK. Retained results pass through the engine's existing containment,
+raster verification, and retry-budget accounting.
 
 ## Invoke
 
@@ -84,6 +127,8 @@ For deterministic diagnostics:
 
 ```bash
 python3.11 scripts/comic_sol.py doctor --output-root /tmp/comic-sol-doctor
+# Installed equivalent:
+comic-sol --json doctor --output-root /tmp/comic-sol-doctor
 ```
 
 ## Inspect the result
