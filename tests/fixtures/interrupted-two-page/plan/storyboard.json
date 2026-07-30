@@ -38,8 +38,7 @@
               "id": "p01-01-t01",
               "kind": "caption",
               "priority": 1,
-              "speaker": null,
-              "tail_target": null
+              "speaker": null
             }
           ]
         }
@@ -83,8 +82,7 @@
               "id": "p01-02-t01",
               "kind": "caption",
               "priority": 1,
-              "speaker": null,
-              "tail_target": null
+              "speaker": null
             }
           ]
         }

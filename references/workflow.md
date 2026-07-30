@@ -77,10 +77,15 @@ semantic content, then `comic_sol.py transition PROJECT_DIR PLANNED`.
 ### 3. Script and storyboard
 
 Write dialogue, captions, exact SFX, pacing, camera, light, continuity, fixed layouts,
-and absolute rectangles to `plan/storyboard.json`. SFX is authored artwork content;
-dialogue and captions are deterministic lettering content. Transition through
-`SCRIPTED`, validate with `validate_project.py PROJECT_DIR --stage storyboard`, then
-transition to `STORYBOARDED`.
+and absolute rectangles to `plan/storyboard.json`. Every dialogue identifies its
+character-bible `speaker`, sets `voice_source` to `human` or `device`, and places a
+normalized `speaker_anchor` on the visible mouth/face or device audio-source region.
+Non-spoken system status is a caption with no tail; captions and SFX omit dialogue-only
+fields. Legacy `tail_target` is readable but blocks lettering with
+`balloon-tail-migration-required` and must be migrated explicitly. SFX is authored
+artwork content; dialogue and captions are deterministic lettering content. Transition
+through `SCRIPTED`, validate with `validate_project.py PROJECT_DIR --stage storyboard`,
+then transition to `STORYBOARDED`.
 
 ### 4. Detect image capability
 

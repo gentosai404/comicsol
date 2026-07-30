@@ -109,7 +109,8 @@ def valid_storyboard():
                 "text": [{
                     "id": "p01-01-t01", "kind": "dialogue", "speaker": "mira",
                     "content": "I have one delivery left.", "anchor": "top-left",
-                    "tail_target": [0.7, 0.5], "priority": 1,
+                    "voice_source": "human", "speaker_anchor": [0.7, 0.5],
+                    "priority": 1,
                 }],
             }],
         }],
@@ -341,12 +342,63 @@ class StrictSchemaValidationTests(unittest.TestCase):
         data = valid_storyboard(); data["pages"][0]["panels"][0]["text"][0]["speaker"] = "ghost"; cases.append((data, "speaker"))
         data = valid_storyboard(); data["pages"][0]["panels"][0]["text"][0]["content"] = "word " * 33; cases.append((data, "content"))
         data = valid_storyboard(); data["pages"][0]["panels"][0]["text"][0]["anchor"] = "center"; cases.append((data, "anchor"))
-        data = valid_storyboard(); data["pages"][0]["panels"][0]["text"][0]["tail_target"] = [1.2, 0.5]; cases.append((data, "tail_target"))
+        data = valid_storyboard(); data["pages"][0]["panels"][0]["text"][0]["speaker_anchor"] = [1.2, 0.5]; cases.append((data, "speaker_anchor"))
         data = valid_storyboard(); data["pages"][0]["panels"][0]["rect"]["x"] = 0; cases.append((data, "rect"))
         for data, field in cases:
             with self.subTest(field=field):
                 self.assert_issue(validate_storyboard(data, story, characters), field)
         self.assertEqual([], validate_storyboard(valid_storyboard(), story, characters))
+
+    def test_storyboard_requires_speaker_aware_dialogue_semantics(self):
+        story, characters = valid_story(), valid_characters()
+        current = valid_storyboard()
+        text = current["pages"][0]["panels"][0]["text"][0]
+        text.update({"voice_source": "human", "speaker_anchor": [0.7, 0.5]})
+        self.assertEqual([], validate_storyboard(current, story, characters))
+
+        cases = []
+        for field in ("voice_source", "speaker_anchor"):
+            data = deepcopy(current)
+            data["pages"][0]["panels"][0]["text"][0].pop(field)
+            cases.append((data, field))
+        data = deepcopy(current)
+        data["pages"][0]["panels"][0]["text"][0]["voice_source"] = "system"
+        cases.append((data, "voice_source"))
+        data = deepcopy(current)
+        data["pages"][0]["panels"][0]["text"][0]["speaker_anchor"] = [0.7, True]
+        cases.append((data, "speaker_anchor"))
+        for data, field in cases:
+            with self.subTest(field=field):
+                self.assert_issue(validate_storyboard(data, story, characters), field)
+
+    def test_storyboard_reports_legacy_tail_migration_and_tail_free_captions(self):
+        story, characters = valid_story(), valid_characters()
+        legacy = valid_storyboard()
+        legacy_item = legacy["pages"][0]["panels"][0]["text"][0]
+        legacy_item.pop("voice_source")
+        legacy_item.pop("speaker_anchor")
+        legacy_item["tail_target"] = [0.7, 0.5]
+        legacy_issues = validate_storyboard(legacy, story, characters)
+        self.assertTrue(any(
+            "balloon-tail-migration-required" in issue.message
+            for issue in legacy_issues
+        ))
+
+        for kind in ("caption", "sfx"):
+            data = valid_storyboard()
+            item = data["pages"][0]["panels"][0]["text"][0]
+            item.update({
+                "kind": kind,
+                "speaker": None,
+                "content": "System status." if kind == "caption" else "KRAK!",
+            })
+            item.pop("voice_source")
+            item.pop("speaker_anchor")
+            self.assertEqual([], validate_storyboard(data, story, characters))
+            item.update({"voice_source": "human", "speaker_anchor": [0.7, 0.5]})
+            issues = validate_storyboard(data, story, characters)
+            self.assert_issue(issues, "voice_source")
+            self.assert_issue(issues, "speaker_anchor")
 
     def test_storyboard_rejects_page_panel_and_text_limits(self):
         story, characters = valid_story(), valid_characters()
@@ -381,7 +433,9 @@ class StrictSchemaValidationTests(unittest.TestCase):
 
         for kind, limit in (("caption", 45), ("sfx", 3)):
             data = valid_storyboard(); text = data["pages"][0]["panels"][0]["text"][0]
-            text.update({"kind": kind, "speaker": None, "tail_target": None, "content": "word " * (limit + 1)})
+            text.update({"kind": kind, "speaker": None, "content": "word " * (limit + 1)})
+            text.pop("voice_source")
+            text.pop("speaker_anchor")
             with self.subTest(kind=kind):
                 self.assert_issue(validate_storyboard(data, story, characters), "content")
 

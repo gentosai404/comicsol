@@ -36,7 +36,8 @@ MAXIMUM_DIALOGUE = (
 def dialogue(content="Keep moving.", priority=1, anchor="top-left"):
     return {
         "id": f"dialogue-{priority}", "kind": "dialogue", "speaker": "mira",
-        "content": content, "anchor": anchor, "tail_target": [0.75, 0.7],
+        "content": content, "anchor": anchor, "voice_source": "human",
+        "speaker_anchor": [0.75, 0.7],
         "priority": priority,
     }
 
@@ -44,7 +45,7 @@ def dialogue(content="Keep moving.", priority=1, anchor="top-left"):
 def caption(content="Below the city, daylight became a delivery.", priority=1, anchor="bottom-right"):
     return {
         "id": f"caption-{priority}", "kind": "caption", "speaker": None,
-        "content": content, "anchor": anchor, "tail_target": None,
+        "content": content, "anchor": anchor,
         "priority": priority,
     }
 
@@ -52,7 +53,7 @@ def caption(content="Below the city, daylight became a delivery.", priority=1, a
 def sfx(content="KRAK!", priority=1, anchor="middle-right"):
     return {
         "id": f"sfx-{priority}", "kind": "sfx", "speaker": None,
-        "content": content, "anchor": anchor, "tail_target": None,
+        "content": content, "anchor": anchor,
         "priority": priority,
     }
 
@@ -72,6 +73,25 @@ class LetteringTests(unittest.TestCase):
         self.assertEqual("Café 😀\nBAM!", normalize_content("  Cafe\u0301\t 😀\x00\n  BAM!  "))
         self.assertEqual(3, normalized_word_count("  one\t two\nthree  "))
         self.assertEqual("Wait... — now!", normalize_content("Wait... — now!"))
+
+    def test_direct_lettering_rejects_legacy_free_coordinate_tail(self):
+        item = dialogue()
+        item.pop("voice_source")
+        item.pop("speaker_anchor")
+        item["tail_target"] = [0.75, 0.7]
+        with self.assertRaisesRegex(ValueError, "balloon-tail-migration-required"):
+            letter_panel(str(self.panel), 800, 1000, [item], self.characters)
+
+    def test_direct_lettering_requires_explicit_speaker_semantics(self):
+        item = dialogue()
+        item.pop("voice_source")
+        item.pop("speaker_anchor")
+        with self.assertRaisesRegex(ValueError, "voice_source"):
+            letter_panel(str(self.panel), 800, 1000, [item], self.characters)
+
+        item["voice_source"] = "human"
+        with self.assertRaisesRegex(ValueError, "speaker_anchor"):
+            letter_panel(str(self.panel), 800, 1000, [item], self.characters)
 
     def test_emphasis_parsing(self):
         from letter_panels import _parse_emphasis
@@ -150,7 +170,7 @@ class LetteringTests(unittest.TestCase):
             image = Image.new("RGB", (480, 220), (28, 32, 40))
             draw = ImageDraw.Draw(image)
             item = dialogue(content)
-            item["tail_target"] = None
+            item["speaker_anchor"] = None
             render_text_item(
                 draw,
                 item,
@@ -280,7 +300,7 @@ class LetteringTests(unittest.TestCase):
         centered_image = Image.new("RGB", (500, 260), (28, 32, 40))
         centered_draw = ImageDraw.Draw(centered_image)
         centered_item = dialogue("I\n**WIDE**")
-        centered_item["tail_target"] = None
+        centered_item["speaker_anchor"] = None
         rect = {"x": 20, "y": 20, "width": 460, "height": 220}
         centered_layout = _layout_styled_text(
             centered_draw,
@@ -374,8 +394,8 @@ class LetteringTests(unittest.TestCase):
         draw = ImageDraw.Draw(image)
         rect = {"x": 40, "y": 30, "width": 120, "height": 70}
         item = dialogue("Hi")
-        item["tail_target"] = [0.8, 0.8]
-        base_one, base_two, _ = _ellipse_tail_polygon(rect, item["tail_target"], 240, 240)
+        item["speaker_anchor"] = [0.8, 0.8]
+        base_one, base_two, _ = _ellipse_tail_polygon(rect, item["speaker_anchor"], 240, 240)
         attachment = tuple(round((first + second) / 2) for first, second in zip(base_one, base_two))
 
         render_text_item(
@@ -543,7 +563,7 @@ class LetteringTests(unittest.TestCase):
         )
 
         item = dialogue(MAXIMUM_DIALOGUE)
-        item["tail_target"] = None
+        item["speaker_anchor"] = None
         self.assertEqual(32, normalized_word_count(item["content"]))
         image = Image.new("RGB", (1200, 1600), (28, 32, 40))
         draw = ImageDraw.Draw(image, "RGBA")
@@ -607,14 +627,14 @@ class LetteringTests(unittest.TestCase):
         self.assertLessEqual(box[3], 962)
         self.assertAlmostEqual(400, (box[0] + box[2]) / 2, delta=2)
 
-    def test_non_finite_tail_target_is_rejected_as_value_error(self):
+    def test_non_finite_speaker_anchor_is_rejected_as_value_error(self):
         from letter_panels import _ellipse_tail_polygon
 
         before = self.panel.read_bytes()
         for value in (float("inf"), float("-inf"), float("nan")):
             item = dialogue()
-            item["tail_target"] = [value, 0.5]
-            with self.assertRaisesRegex(ValueError, "non-finite tail target"):
+            item["speaker_anchor"] = [value, 0.5]
+            with self.assertRaisesRegex(ValueError, "speaker_anchor"):
                 letter_panel(str(self.panel), 800, 1000, [item], self.characters)
             self.assertEqual(before, self.panel.read_bytes())
             with self.assertRaisesRegex(ValueError, "finite"):
@@ -900,7 +920,7 @@ class LetteringTests(unittest.TestCase):
             self.assertIn("font", errors.getvalue().lower())
             self.assertNotIn("Traceback", errors.getvalue())
 
-    def test_cli_rejects_non_finite_tail_target_without_traceback(self):
+    def test_cli_rejects_non_finite_speaker_anchor_without_traceback(self):
         import contextlib
         import io
 
@@ -911,7 +931,7 @@ class LetteringTests(unittest.TestCase):
             shutil.copytree(FIXTURES / "valid-one-page", project)
             storyboard_path = project / "plan/storyboard.json"
             storyboard = json.loads(storyboard_path.read_text("utf-8"))
-            storyboard["pages"][0]["panels"][1]["text"][0]["tail_target"] = [
+            storyboard["pages"][0]["panels"][1]["text"][0]["speaker_anchor"] = [
                 float("inf"), 0.55,
             ]
             storyboard_path.write_text(json.dumps(storyboard), "utf-8")
@@ -920,7 +940,7 @@ class LetteringTests(unittest.TestCase):
             with contextlib.redirect_stderr(errors):
                 self.assertEqual(1, letter_main([str(project)]))
             self.assertTrue(errors.getvalue().startswith("ERROR ValueError:"))
-            self.assertIn("tail target", errors.getvalue())
+            self.assertIn("speaker_anchor", errors.getvalue())
             self.assertNotIn("Traceback", errors.getvalue())
 
     def test_cli_rejects_oversized_panel_image_without_traceback(self):

@@ -38,8 +38,7 @@
               "id": "p01-01-t01",
               "kind": "caption",
               "priority": 1,
-              "speaker": null,
-              "tail_target": null
+              "speaker": null
             }
           ]
         },
@@ -78,10 +77,11 @@
               "kind": "dialogue",
               "priority": 1,
               "speaker": "mira",
-              "tail_target": [
+              "speaker_anchor": [
                 0.7,
                 0.55
-              ]
+              ],
+              "voice_source": "human"
             }
           ]
         },
@@ -119,8 +119,7 @@
               "id": "p01-03-t01",
               "kind": "caption",
               "priority": 1,
-              "speaker": null,
-              "tail_target": null
+              "speaker": null
             }
           ]
         }

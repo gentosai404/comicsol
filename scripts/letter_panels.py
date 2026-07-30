@@ -713,7 +713,7 @@ def render_text_item(
         text_y = y0 + max(0, (bounded["height"] - text_height) / 2)
 
     if kind == "dialogue":
-        tail = item.get("tail_target")
+        tail = item.get("speaker_anchor")
         if isinstance(tail, list) and len(tail) == 2 and all(isinstance(value, (int, float)) for value in tail):
             tail_polygon = _ellipse_tail_polygon(
                 bounded | {"x": x0, "y": y0}, tail, image_width, image_height
@@ -782,6 +782,32 @@ def letter_panel(
     for item in ordered:
         if item.get("kind") == "dialogue" and not _known_character(character_bible, item.get("speaker")):
             raise ValueError(f"unknown dialogue character: {item.get('speaker')}")
+        if item.get("kind") == "dialogue":
+            if "tail_target" in item:
+                raise ValueError(
+                    "balloon-tail-migration-required: replace tail_target with "
+                    "explicit voice_source and speaker_anchor"
+                )
+            if item.get("voice_source") not in {"human", "device"}:
+                raise ValueError(
+                    f"text item {item.get('id', 'unknown')} voice_source must be human or device"
+                )
+            speaker_anchor = item.get("speaker_anchor")
+            if (
+                not isinstance(speaker_anchor, list)
+                or len(speaker_anchor) != 2
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or not 0 <= value <= 1
+                    for value in speaker_anchor
+                )
+            ):
+                raise ValueError(
+                    f"text item {item.get('id', 'unknown')} speaker_anchor must be "
+                    "finite normalized coordinates"
+                )
         content = normalize_content(item.get("content", ""))
         limit = {"dialogue": 32, "caption": 45, "sfx": 3}.get(item.get("kind"))
         if limit is None:
@@ -791,13 +817,6 @@ def letter_panel(
         anchor = item.get("anchor", "top-left")
         if anchor not in ANCHORS:
             raise ValueError(f"text item {item.get('id', 'unknown')} has unknown anchor")
-        tail = item.get("tail_target")
-        if isinstance(tail, list) and any(
-            isinstance(value, float) and not math.isfinite(value) for value in tail
-        ):
-            raise ValueError(
-                f"text item {item.get('id', 'unknown')} has a non-finite tail target"
-            )
         item["content"] = content
 
     rendered_text_count = sum(item.get("kind") != "sfx" for item in ordered)
@@ -857,7 +876,7 @@ def letter_panel(
             for run_text, run_font in _styled_font_runs(display, font)
         ]
         tail_geometry = None
-        tail = item.get("tail_target")
+        tail = item.get("speaker_anchor")
         if (
             item.get("kind") == "dialogue"
             and isinstance(tail, list)

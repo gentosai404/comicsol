@@ -418,8 +418,9 @@ def _validate_text_item(
     path: str,
     prefix: str,
 ) -> int:
-    fields = {"id", "kind", "speaker", "content", "anchor", "tail_target", "priority"}
-    item = _object(value, fields, fields, issues, path, prefix)
+    base_fields = {"id", "kind", "speaker", "content", "anchor", "priority"}
+    dialogue_fields = {"voice_source", "speaker_anchor", "tail_target"}
+    item = _object(value, base_fields | dialogue_fields, base_fields, issues, path, prefix)
     if item is None:
         return 0
     _identifier(item.get("id"), issues, path, f"{prefix}.id")
@@ -448,16 +449,45 @@ def _validate_text_item(
         _add(issues, path, f"{prefix}.speaker", "must be null for caption and sfx")
     if item.get("anchor") not in ANCHORS:
         _add(issues, path, f"{prefix}.anchor", "unknown text anchor")
-    tail = item.get("tail_target")
+    has_legacy_tail = "tail_target" in item
+    has_voice_source = "voice_source" in item
+    has_speaker_anchor = "speaker_anchor" in item
     if kind == "dialogue":
-        if (
-            not isinstance(tail, list)
-            or len(tail) != 2
-            or any(isinstance(number, bool) or not isinstance(number, (int, float)) or not 0 <= number <= 1 for number in tail)
-        ):
-            _add(issues, path, f"{prefix}.tail_target", "must be normalized [x, y] coordinates")
-    elif tail is not None:
-        _add(issues, path, f"{prefix}.tail_target", "must be null for caption and sfx")
+        if has_legacy_tail:
+            _add(
+                issues,
+                path,
+                f"{prefix}.tail_target",
+                "balloon-tail-migration-required: replace tail_target with explicit voice_source and speaker_anchor",
+            )
+        else:
+            if item.get("voice_source") not in {"human", "device"}:
+                _add(issues, path, f"{prefix}.voice_source", "must be human or device")
+            speaker_anchor = item.get("speaker_anchor")
+            if (
+                not isinstance(speaker_anchor, list)
+                or len(speaker_anchor) != 2
+                or any(
+                    isinstance(number, bool)
+                    or not isinstance(number, (int, float))
+                    or not math.isfinite(float(number))
+                    or not 0 <= number <= 1
+                    for number in speaker_anchor
+                )
+            ):
+                _add(
+                    issues,
+                    path,
+                    f"{prefix}.speaker_anchor",
+                    "must be finite normalized [x, y] coordinates",
+                )
+    else:
+        if has_legacy_tail:
+            _add(issues, path, f"{prefix}.tail_target", "must be omitted for caption and sfx")
+        if has_voice_source:
+            _add(issues, path, f"{prefix}.voice_source", "must be omitted for caption and sfx")
+        if has_speaker_anchor:
+            _add(issues, path, f"{prefix}.speaker_anchor", "must be omitted for caption and sfx")
     _integer(item.get("priority"), 1, 1_000_000, issues, path, f"{prefix}.priority")
     return word_count
 
