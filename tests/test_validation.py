@@ -949,6 +949,17 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(required, readme)
         self.assertNotRegex(readme.lower(), r"npm run|start the server|docker compose")
 
+    def test_public_surface_uses_the_canonical_independent_repository(self):
+        readme = self.readme()
+        workflow = (ROOT / ".github/workflows/tests.yml").read_text("utf-8")
+        self.assertIn("https://github.com/wenn-id/comic-sol-lab", readme)
+        self.assertIn("canonical, independent home", readme)
+        self.assertNotIn("https://github.com/wenn-id/comic-sol.git", readme)
+        self.assertIn("branches: [ main ]", workflow)
+        self.assertNotIn("ai/post-event-development", workflow)
+        for name in ("CONTRIBUTING.md", "SECURITY.md"):
+            self.assertTrue((ROOT / name).is_file(), name)
+
     def test_package_files_install_and_artifact_contract_are_documented(self):
         for name in ("LICENSE", "README.md", "SKILL.md"):
             self.assertTrue((ROOT / name).is_file(), name)
