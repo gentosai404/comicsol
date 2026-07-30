@@ -6,7 +6,7 @@ invocation drives planning, character consistency, image generation, visual QA,
 selective repair, deterministic lettering and composition, and PDF export. It is
 not a web app or hosted product. No build service is required.
 
-This repository, [`wenn-id/comic-sol-lab`](https://github.com/wenn-id/comic-sol-lab),
+This repository, [`wenn-id/comicsol`](https://github.com/wenn-id/comicsol),
 is the canonical, independent home of Comic Sol. New development, issues, pull
 requests, documentation, and releases happen here.
 
@@ -20,7 +20,7 @@ Clone the public repository directly into the Codex skills directory, then insta
 the one pinned dependency:
 
 ```bash
-git clone https://github.com/wenn-id/comic-sol-lab.git \
+git clone https://github.com/wenn-id/comicsol.git \
   "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
 cd "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
 python3.11 -m pip install -r requirements.txt
@@ -33,7 +33,7 @@ beneath the Codex skills directory configured by your Codex installation. Keep
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/wenn-id/comic-sol-lab.git `
+git clone https://github.com/wenn-id/comicsol.git `
   "$env:USERPROFILE\.codex\skills\comic-sol"
 Set-Location "$env:USERPROFILE\.codex\skills\comic-sol"
 py -3.11 -m pip install -r requirements.txt

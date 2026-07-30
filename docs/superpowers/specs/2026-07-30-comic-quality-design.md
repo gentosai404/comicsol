@@ -4,7 +4,7 @@
 
 **Status:** Approved design awaiting implementation plan
 
-**Repository:** `wenn-id/comic-sol-lab` (private)
+**Repository:** `wenn-id/comicsol` (then private; now public)
 
 **Development branch:** `ai/comic-quality`
 

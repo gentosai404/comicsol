@@ -1,6 +1,6 @@
 # Contributing to Comic Sol
 
-`wenn-id/comic-sol-lab` is the canonical public repository for Comic Sol. Development is review-first: create a focused branch, open a pull request into `main`, and keep unrelated changes separate.
+`wenn-id/comicsol` is the canonical public repository for Comic Sol. Development is review-first: create a focused branch, open a pull request into `main`, and keep unrelated changes separate.
 
 ## Development setup
 

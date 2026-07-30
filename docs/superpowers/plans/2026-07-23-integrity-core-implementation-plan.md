@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in private repository `wenn-id/comic-sol-lab` on an `ai/*` branch.
+- Work only in the canonical repository `wenn-id/comicsol` on an `ai/*` branch.
 - Do not modify or push `wenn-id/comic-sol/main`.
 - Preserve existing schema-v1 projects unless a migration is explicit and tested.
 - Use stdlib before new dependencies; add no runtime dependency for locking or transactions.
@@ -1182,7 +1182,7 @@ git status --short
 git diff --cached --check
 git commit -m "fix: close Integrity Core review blockers"
 git push origin HEAD
-gh pr create --repo wenn-id/comic-sol-lab \
+gh pr create --repo wenn-id/comicsol \
   --base ai/post-event-development \
   --head ai/integrity-core \
   --title "feat: harden Comic Sol Integrity Core" \
