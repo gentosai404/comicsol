@@ -418,8 +418,9 @@ def _validate_text_item(
     path: str,
     prefix: str,
 ) -> int:
-    fields = {"id", "kind", "speaker", "content", "anchor", "tail_target", "priority"}
-    item = _object(value, fields, fields, issues, path, prefix)
+    base_fields = {"id", "kind", "speaker", "content", "anchor", "priority"}
+    dialogue_fields = {"voice_source", "speaker_anchor", "tail_target"}
+    item = _object(value, base_fields | dialogue_fields, base_fields, issues, path, prefix)
     if item is None:
         return 0
     _identifier(item.get("id"), issues, path, f"{prefix}.id")
@@ -448,16 +449,45 @@ def _validate_text_item(
         _add(issues, path, f"{prefix}.speaker", "must be null for caption and sfx")
     if item.get("anchor") not in ANCHORS:
         _add(issues, path, f"{prefix}.anchor", "unknown text anchor")
-    tail = item.get("tail_target")
+    has_legacy_tail = "tail_target" in item
+    has_voice_source = "voice_source" in item
+    has_speaker_anchor = "speaker_anchor" in item
     if kind == "dialogue":
-        if (
-            not isinstance(tail, list)
-            or len(tail) != 2
-            or any(isinstance(number, bool) or not isinstance(number, (int, float)) or not 0 <= number <= 1 for number in tail)
-        ):
-            _add(issues, path, f"{prefix}.tail_target", "must be normalized [x, y] coordinates")
-    elif tail is not None:
-        _add(issues, path, f"{prefix}.tail_target", "must be null for caption and sfx")
+        if has_legacy_tail:
+            _add(
+                issues,
+                path,
+                f"{prefix}.tail_target",
+                "balloon-tail-migration-required: replace tail_target with explicit voice_source and speaker_anchor",
+            )
+        else:
+            if item.get("voice_source") not in {"human", "device"}:
+                _add(issues, path, f"{prefix}.voice_source", "must be human or device")
+            speaker_anchor = item.get("speaker_anchor")
+            if (
+                not isinstance(speaker_anchor, list)
+                or len(speaker_anchor) != 2
+                or any(
+                    isinstance(number, bool)
+                    or not isinstance(number, (int, float))
+                    or not math.isfinite(float(number))
+                    or not 0 <= number <= 1
+                    for number in speaker_anchor
+                )
+            ):
+                _add(
+                    issues,
+                    path,
+                    f"{prefix}.speaker_anchor",
+                    "must be finite normalized [x, y] coordinates",
+                )
+    else:
+        if has_legacy_tail:
+            _add(issues, path, f"{prefix}.tail_target", "must be omitted for caption and sfx")
+        if has_voice_source:
+            _add(issues, path, f"{prefix}.voice_source", "must be omitted for caption and sfx")
+        if has_speaker_anchor:
+            _add(issues, path, f"{prefix}.speaker_anchor", "must be omitted for caption and sfx")
     _integer(item.get("priority"), 1, 1_000_000, issues, path, f"{prefix}.priority")
     return word_count
 
@@ -1108,22 +1138,61 @@ def validate_lettering_provenance(
                 stale("items.box", "item box is missing or non-positive")
             tail = entry.get("tail")
             if tail is not None:
-                valid_tail = isinstance(tail, dict)
-                for key in ("origin", "target"):
-                    point = tail.get(key) if isinstance(tail, dict) else None
-                    valid_tail = (
-                        valid_tail
-                        and isinstance(point, list)
-                        and len(point) == 2
+                expected_tail_fields = {
+                    "attachment", "base", "control", "length", "policy_version",
+                    "source_gap", "speaker_anchor", "tip", "voice_source", "width",
+                }
+
+                def finite_point(value: object) -> bool:
+                    return (
+                        isinstance(value, list)
+                        and len(value) == 2
                         and all(
-                            isinstance(value, (int, float))
-                            and not isinstance(value, bool)
-                            and math.isfinite(value)
-                            for value in (point or [])
+                            isinstance(coordinate, (int, float))
+                            and not isinstance(coordinate, bool)
+                            and math.isfinite(coordinate)
+                            for coordinate in value
                         )
                     )
+
+                valid_tail = (
+                    isinstance(tail, dict)
+                    and set(tail) == expected_tail_fields
+                    and tail.get("policy_version") == "organic-cubic-v1"
+                    and tail.get("voice_source") in {"human", "device"}
+                    and finite_point(tail.get("speaker_anchor"))
+                    and all(0 <= coordinate <= 1 for coordinate in tail.get("speaker_anchor", []))
+                    and finite_point(tail.get("attachment"))
+                    and finite_point(tail.get("tip"))
+                )
+                base = tail.get("base") if isinstance(tail, dict) else None
+                control = tail.get("control") if isinstance(tail, dict) else None
+                valid_tail = (
+                    valid_tail
+                    and isinstance(base, list)
+                    and len(base) == 2
+                    and all(finite_point(point) for point in base)
+                    and isinstance(control, list)
+                    and len(control) == 2
+                    and all(
+                        isinstance(side, list)
+                        and len(side) == 2
+                        and all(finite_point(point) for point in side)
+                        for side in control
+                    )
+                    and all(
+                        isinstance(tail.get(field), (int, float))
+                        and not isinstance(tail.get(field), bool)
+                        and math.isfinite(tail[field])
+                        and tail[field] > 0
+                        for field in ("length", "source_gap", "width")
+                    )
+                )
                 if not valid_tail:
-                    stale("items.tail", "tail coordinates must be finite points")
+                    stale(
+                        "items.tail",
+                        "tail must be a finite organic-cubic-v1 semantic geometry record",
+                    )
         if len(orders) != len(set(orders)):
             stale("items.reading_order", "reading order values must be unique")
 

@@ -181,15 +181,18 @@ Each `continuity` entry is `<owner-id>:<fact>`, where `owner-id` is a character 
 |---|---|---|
 | `id` | ID | Unique project-wide text ID |
 | `kind` | enum | `dialogue`, `caption`, or `sfx` |
-| `speaker` | ID or null | Required for dialogue; null for caption/SFX |
+| `speaker` | ID or null | Required for dialogue and resolves to an entity present in the character bible and panel; null for caption/SFX |
+| `voice_source` | enum or omitted | Dialogue only: exactly `human` or `device` |
+| `speaker_anchor` | array[number] or omitted | Dialogue only: finite normalized `[x,y]` coordinates for the visible voice-source region |
 | `content` | string | NFC-normalized; dialogue ≤32 words, caption ≤45, SFX ≤3 |
 | `anchor` | enum | One of eight anchors below |
-| `tail_target` | array[number] or null | Dialogue `[x,y]`, each normalized 0–1; otherwise null |
 | `priority` | integer | Positive placement order; ties break by item ID |
 
-Anchors are `top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, and `bottom-right`. `anchor` places every text item, captions included. Control characters other than newline are invalid. Explicit newlines are optional wrapping hints. Authored punctuation and words are not rewritten by deterministic scripts.
+Anchors are `top-left`, `top-center`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-center`, and `bottom-right`. `anchor` places every text item, captions included. Human `speaker_anchor` identifies the visible mouth/face voice-source region; spoken devices use `voice_source: device` and anchor their visible audio source. Non-spoken system status is a caption and has no tail. Captions and SFX omit `voice_source` and `speaker_anchor`. Legacy `tail_target` remains readable but produces `balloon-tail-migration-required` at lettering and later stages; it is never silently reinterpreted. Control characters other than newline are invalid. Explicit newlines are optional wrapping hints. Authored punctuation and words are not rewritten by deterministic scripts.
 
 The word limits are a ceiling, not a guarantee of fit. Dialogue is inscribed in an oval, which holds roughly half the text of the rectangle bounding it, and an anchor area is about 42% of panel width by 30% of panel height. A 32-word line needs a panel of roughly 1000x1200 px or larger; a 720x1064 panel holds about 14 words. Lettering fails with `text item {id} does not fit inside the panel` rather than printing over the artwork, so size dialogue to the panel rectangle the storyboard assigns it.
+
+Dialogue tails are stored in lettering geometry as `organic-cubic-v1` records containing `attachment`, `base`, `control`, `tip`, `speaker_anchor`, `voice_source`, `source_gap`, `length`, `width`, and `policy_version`. The body and cubic tail are supersampled into one mask before one outline is derived. Page-QA check `bubble-tail-direction` requires exactly one current `regions` entry per dialogue with `panel_id`, `text_id`, `speaker`, `voice_source`, `speaker_anchor`, `tip`, and `result`; generic or stale regions fail closed.
 
 Dialogue and captions are deterministic lettering inputs. SFX is authored storyboard
 content for generation prompts and visual QA, but Pillow neither draws SFX nor allocates a placement rectangle or overlap reservation. Lettering summaries retain `text_count`

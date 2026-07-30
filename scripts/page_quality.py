@@ -212,6 +212,95 @@ def _reviewer_checks(values: Sequence[Mapping[str, object]]) -> list[dict[str, o
     return checks
 
 
+def _validate_tail_evidence(
+    context: Mapping[str, object], checks: Sequence[Mapping[str, object]]
+) -> None:
+    """Require one current bounded-review region for every authored dialogue."""
+    tail_check = next(
+        (check for check in checks if check.get("id") == "bubble-tail-direction"),
+        None,
+    )
+    if tail_check is None:
+        raise ValueError("bubble-tail-evidence-mismatch: check is missing")
+    regions = tail_check.get("regions")
+    if not isinstance(regions, list):
+        raise ValueError("bubble-tail-evidence-mismatch: regions must be an array")
+
+    panels = context.get("panels")
+    lettering = context.get("lettering")
+    if not isinstance(panels, list) or not isinstance(lettering, list):
+        raise ValueError("bubble-tail-evidence-mismatch: page context is invalid")
+    geometry_by_panel = {
+        panel_id: geometry
+        for panel_id, _, geometry in lettering
+        if isinstance(panel_id, str) and isinstance(geometry, dict)
+    }
+    expected: dict[tuple[str, str], dict[str, object]] = {}
+    for panel in panels:
+        if not isinstance(panel, dict) or not isinstance(panel.get("id"), str):
+            raise ValueError("bubble-tail-evidence-mismatch: panel is invalid")
+        panel_id = panel["id"]
+        geometry = geometry_by_panel.get(panel_id)
+        items = geometry.get("items") if isinstance(geometry, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("bubble-tail-evidence-mismatch: lettering geometry is missing")
+        placed = {
+            item.get("id"): item
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        text_items = panel.get("text")
+        if not isinstance(text_items, list):
+            raise ValueError("bubble-tail-evidence-mismatch: panel text is invalid")
+        for item in text_items:
+            if not isinstance(item, dict) or item.get("kind") != "dialogue":
+                continue
+            text_id = item.get("id")
+            geometry_item = placed.get(text_id)
+            tail = geometry_item.get("tail") if isinstance(geometry_item, dict) else None
+            if not isinstance(text_id, str) or not isinstance(tail, dict):
+                raise ValueError("bubble-tail-evidence-mismatch: dialogue tail is missing")
+            expected[(panel_id, text_id)] = {
+                "panel_id": panel_id,
+                "text_id": text_id,
+                "speaker": item.get("speaker"),
+                "voice_source": item.get("voice_source"),
+                "speaker_anchor": item.get("speaker_anchor"),
+                "tip": tail.get("tip"),
+            }
+
+    observed: dict[tuple[str, str], Mapping[str, object]] = {}
+    required_fields = {
+        "panel_id", "text_id", "speaker", "voice_source",
+        "speaker_anchor", "tip", "result",
+    }
+    for region in regions:
+        if not isinstance(region, dict) or set(region) != required_fields:
+            raise ValueError("bubble-tail-evidence-mismatch: region fields are invalid")
+        panel_id = region.get("panel_id")
+        text_id = region.get("text_id")
+        if not isinstance(panel_id, str) or not isinstance(text_id, str):
+            raise ValueError("bubble-tail-evidence-mismatch: region identity is invalid")
+        key = (panel_id, text_id)
+        if key in observed or region.get("result") not in {"pass", "fail"}:
+            raise ValueError("bubble-tail-evidence-mismatch: region identity is invalid")
+        observed[key] = region
+
+    if set(observed) != set(expected):
+        raise ValueError("bubble-tail-evidence-mismatch: dialogue coverage is incomplete")
+    for key, expected_region in expected.items():
+        region = observed[key]
+        if any(region.get(field) != value for field, value in expected_region.items()):
+            raise ValueError("bubble-tail-evidence-mismatch: region is stale")
+
+    results = [region.get("result") for region in observed.values()]
+    check_result = tail_check.get("result")
+    if (check_result == "pass" and any(result != "pass" for result in results)) or (
+        check_result == "fail" and results and all(result == "pass" for result in results)
+    ):
+        raise ValueError("bubble-tail-evidence-mismatch: check result is inconsistent")
+
+
 def build_page_quality_record(
     project_dir: Path,
     page_number: int,
@@ -222,6 +311,7 @@ def build_page_quality_record(
     context = _page_context(project_dir, page_number)
     deterministic = _deterministic_checks(context)
     subjective = _reviewer_checks(visual_checks)
+    _validate_tail_evidence(context, subjective)
     checks_by_id = {check["id"]: check for check in deterministic + subjective}
     checks = [checks_by_id[check_id] for check_id in PAGE_CHECK_IDS]
     failures = [check for check in checks if check.get("result") == "fail"]

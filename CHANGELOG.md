@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.0.0rc4 — 2026-07-30
+
+Speaker-aware balloon-tail prerelease.
+
+### Added
+
+- Validated `speaker`, `voice_source`, and `speaker_anchor` semantics for every dialogue tail.
+- Deterministic `organic-cubic-v1` geometry provenance and artifact-bound per-dialogue page-QA regions.
+
+### Fixed
+
+- Replaced short triangular wedge tails with merged-body, non-crossing cubic silhouettes that preserve a durable white core and point toward the declared voice source.
+- Captions, system status, and SFX now fail closed if dialogue-only tail fields are present.
+- Legacy free-coordinate `tail_target` inputs require explicit migration instead of silent reinterpretation.
+
+### Distribution and limitations
+
+- Linux, macOS, and Windows x86_64 bundles, CycloneDX SBOMs, and SHA-256 manifests remain available.
+- Native archives and installers remain unsigned; verify them against `SHA256SUMS`.
+
 ## 2.0.0rc3 — 2026-07-30
 
 Focused PDF fidelity prerelease.

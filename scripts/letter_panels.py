@@ -50,7 +50,7 @@ CAPTION_PADDING = 20
 # Panels are page-sized at most (1600x2400); sixteen page areas leaves room for
 # oversampled source art while rejecting decompression bombs.
 MAX_DECODED_PIXELS = 1600 * 2400 * 16
-BALLOON_SUPERSAMPLE = 4
+BALLOON_SUPERSAMPLE = 6
 
 
 def normalize_content(text: str) -> str:
@@ -537,74 +537,128 @@ def _fitted_item_rect(
     return {"x": x, "y": y, "width": fitted_width, "height": fitted_height}
 
 
-def _ellipse_tail_polygon(
+def _organic_tail_geometry(
     rect: dict[str, int],
-    tail_target: list[float],
+    speaker_anchor: list[float],
     image_width: int,
     image_height: int,
-) -> tuple[tuple[float, float], tuple[float, float], tuple[int, int]]:
-    """Return a triangular tail based at the nearest ellipse point toward target."""
-    if not all(math.isfinite(float(value)) for value in tail_target):
-        raise ValueError("dialogue tail target coordinates must be finite numbers")
-    target_x = min(image_width - 1, max(0, round(float(tail_target[0]) * image_width)))
-    target_y = min(image_height - 1, max(0, round(float(tail_target[1]) * image_height)))
+    voice_source: str,
+) -> dict[str, object]:
+    """Resolve one compact, tapered cubic tail toward an explicit voice source."""
+    if voice_source not in {"human", "device"}:
+        raise ValueError("dialogue voice source must be human or device")
+    if (
+        not isinstance(speaker_anchor, list)
+        or len(speaker_anchor) != 2
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0 <= value <= 1
+            for value in speaker_anchor
+        )
+    ):
+        raise ValueError("speaker anchor must contain finite normalized coordinates")
+    target_x = round(float(speaker_anchor[0]) * image_width)
+    target_y = round(float(speaker_anchor[1]) * image_height)
     center_x = rect["x"] + rect["width"] / 2
     center_y = rect["y"] + rect["height"] / 2
     radius_x = max(0.5, rect["width"] / 2)
     radius_y = max(0.5, rect["height"] / 2)
     delta_x = target_x - center_x
     delta_y = target_y - center_y
-    if delta_x == 0 and delta_y == 0:
-        delta_y = 1.0
-    scale = 1 / math.sqrt((delta_x / radius_x) ** 2 + (delta_y / radius_y) ** 2)
+    normalized_distance = math.sqrt(
+        (delta_x / radius_x) ** 2 + (delta_y / radius_y) ** 2
+    )
+    if normalized_distance <= 1.08:
+        raise ValueError("speaker anchor must remain outside the balloon outline")
+    scale = 1 / normalized_distance
     attachment_x = center_x + delta_x * scale
     attachment_y = center_y + delta_y * scale
-    # A tail is a short pointer, not a leash across faces or focal action.
-    minor_radius = min(radius_x, radius_y)
-    max_tail = max(
-        1.0,
-        min(
-            minor_radius * 0.75,
-            rect["height"] * 0.35,
-            min(image_width, image_height) * 0.055,
+    source_distance = math.hypot(
+        target_x - attachment_x, target_y - attachment_y
+    )
+    minimum_source_gap = max(
+        8.0, min(24.0, min(image_width, image_height) * 0.025)
+    )
+    available_length = source_distance - minimum_source_gap
+    maximum_length = min(
+        min(radius_x, radius_y) * 0.9,
+        min(image_width, image_height) * 0.12,
+    )
+    if available_length < 12.0:
+        raise ValueError("speaker anchor is too close to the balloon for a readable tail")
+    tail_length = min(available_length, maximum_length)
+    source_gap = source_distance - tail_length
+    unit_x = (target_x - attachment_x) / source_distance
+    unit_y = (target_y - attachment_y) / source_distance
+    half_base = max(5.0, min(14.0, tail_length * 0.18))
+
+    # Begin both cubic sides inside the balloon body. The merged mask then
+    # computes the visible ellipse/tail intersection naturally, avoiding the
+    # cusp and shoulder produced by forcing roots onto the ellipse outline.
+    normal_x, normal_y = -unit_y, unit_x
+    root_depth = min(10.0, half_base * 0.7)
+    base_one = (
+        attachment_x - unit_x * root_depth + normal_x * half_base,
+        attachment_y - unit_y * root_depth + normal_y * half_base,
+    )
+    base_two = (
+        attachment_x - unit_x * root_depth - normal_x * half_base,
+        attachment_y - unit_y * root_depth - normal_y * half_base,
+    )
+    tip = (
+        attachment_x + unit_x * tail_length,
+        attachment_y + unit_y * tail_length,
+    )
+    shoulder_run = min(22.0, tail_length * 0.30)
+    near_tip_run = min(24.0, tail_length * 0.30)
+    near_tip_half_width = max(2.6, half_base * 0.30)
+    first_controls = (
+        (
+            attachment_x + unit_x * shoulder_run + normal_x * half_base * 0.92,
+            attachment_y + unit_y * shoulder_run + normal_y * half_base * 0.92,
+        ),
+        (
+            tip[0] - unit_x * near_tip_run + normal_x * near_tip_half_width,
+            tip[1] - unit_y * near_tip_run + normal_y * near_tip_half_width,
         ),
     )
-    length = math.hypot(delta_x, delta_y)
-    unit_x, unit_y = delta_x / length, delta_y / length
-    # The authored target can land inside a fitted balloon after wrapping. In
-    # that case target→attachment points inward and the tail disappears under
-    # the white fill. Always extend outward along the speaker ray and preserve
-    # a visible minimum while retaining the strict upper bounds above.
-    target_projection = (
-        (target_x - attachment_x) * unit_x
-        + (target_y - attachment_y) * unit_y
+    second_controls = (
+        (
+            attachment_x + unit_x * shoulder_run - normal_x * half_base * 0.92,
+            attachment_y + unit_y * shoulder_run - normal_y * half_base * 0.92,
+        ),
+        (
+            tip[0] - unit_x * near_tip_run - normal_x * near_tip_half_width,
+            tip[1] - unit_y * near_tip_run - normal_y * near_tip_half_width,
+        ),
     )
-    desired_tail = (
-        target_projection
-        if target_projection > 0
-        else minor_radius * 0.35
-    )
-    tail_length = min(max_tail, max(12.0, desired_tail))
-    clamped_x = round(attachment_x + unit_x * tail_length)
-    clamped_y = round(attachment_y + unit_y * tail_length)
-    tangent_x, tangent_y = -delta_y / length, delta_x / length
-    # Use a broad comic-print wedge rather than a needle-like spike. Keep the
-    # base proportional to the balloon while the independently capped length
-    # prevents it from crossing faces or focal action.
-    half_base = max(
-        7.0,
-        min(radius_x, radius_y) * 0.18,
-        tail_length * 0.34,
-    )
-    base_one = (attachment_x + tangent_x * half_base, attachment_y + tangent_y * half_base)
-    base_two = (attachment_x - tangent_x * half_base, attachment_y - tangent_y * half_base)
-    return base_one, base_two, (clamped_x, clamped_y)
+
+    def rounded(point: tuple[float, float]) -> list[float]:
+        return [round(point[0], 4), round(point[1], 4)]
+
+    return {
+        "attachment": rounded((attachment_x, attachment_y)),
+        "base": [rounded(base_one), rounded(base_two)],
+        "control": [
+            [rounded(point) for point in first_controls],
+            [rounded(point) for point in second_controls],
+        ],
+        "length": round(tail_length, 4),
+        "policy_version": "organic-cubic-v1",
+        "source_gap": round(source_gap, 4),
+        "speaker_anchor": [float(value) for value in speaker_anchor],
+        "tip": rounded(tip),
+        "voice_source": voice_source,
+        "width": round(half_base * 2, 4),
+    }
 
 
 def _draw_antialiased_balloon(
     draw: ImageDraw.ImageDraw,
     bounds: tuple[int, int, int, int],
-    tail: tuple[tuple[float, float], tuple[float, float], tuple[int, int]] | None,
+    tail: dict[str, object] | None,
 ) -> None:
     """Draw one seamless supersampled balloon and composite it onto the panel."""
     image = draw._image
@@ -613,7 +667,14 @@ def _draw_antialiased_balloon(
     x0, y0, x1, y1 = bounds
     points = [(float(x0), float(y0)), (float(x1), float(y1))]
     if tail is not None:
-        points.extend((float(x), float(y)) for x, y in tail)
+        base = tail.get("base")
+        control = tail.get("control")
+        tip_value = tail.get("tip")
+        if not isinstance(base, list) or not isinstance(control, list) or not isinstance(tip_value, list):
+            raise ValueError("tail geometry has an invalid point record")
+        points.extend(tuple(point) for point in base)
+        points.extend(tuple(point) for side in control for point in side)
+        points.append(tuple(tip_value))
     margin = 5
     left = max(0, math.floor(min(x for x, _ in points)) - margin)
     top = max(0, math.floor(min(y for _, y in points)) - margin)
@@ -626,7 +687,39 @@ def _draw_antialiased_balloon(
         return round((point[0] - left) * scale), round((point[1] - top) * scale)
 
     if tail is not None:
-        mask_draw.polygon(tuple(scaled_point(point) for point in tail), fill=255)
+        base = tail.get("base")
+        control = tail.get("control")
+        tip_value = tail.get("tip")
+        if not isinstance(base, list) or not isinstance(control, list) or not isinstance(tip_value, list):
+            raise ValueError("tail geometry has an invalid point record")
+        base_one, base_two = (tuple(point) for point in base)
+        first_control, second_control = (
+            tuple(tuple(point) for point in side) for side in control
+        )
+        tip = tuple(tip_value)
+
+        def cubic_points(start, controls, end):
+            first, second = controls
+            result = []
+            for index in range(25):
+                t = index / 24
+                inverse = 1 - t
+                result.append((
+                    inverse ** 3 * start[0]
+                    + 3 * inverse ** 2 * t * first[0]
+                    + 3 * inverse * t ** 2 * second[0]
+                    + t ** 3 * end[0],
+                    inverse ** 3 * start[1]
+                    + 3 * inverse ** 2 * t * first[1]
+                    + 3 * inverse * t ** 2 * second[1]
+                    + t ** 3 * end[1],
+                ))
+            return result
+
+        first_side = cubic_points(base_one, first_control, tip)
+        second_side = cubic_points(base_two, second_control, tip)
+        silhouette = first_side + list(reversed(second_side))
+        mask_draw.polygon(tuple(scaled_point(point) for point in silhouette), fill=255)
     mask_draw.ellipse(
         ((x0 - left) * scale, (y0 - top) * scale,
          (x1 - left) * scale, (y1 - top) * scale),
@@ -713,12 +806,19 @@ def render_text_item(
         text_y = y0 + max(0, (bounded["height"] - text_height) / 2)
 
     if kind == "dialogue":
-        tail = item.get("tail_target")
+        tail = item.get("speaker_anchor")
+        voice_source = item.get("voice_source")
         if isinstance(tail, list) and len(tail) == 2 and all(isinstance(value, (int, float)) for value in tail):
-            tail_polygon = _ellipse_tail_polygon(
-                bounded | {"x": x0, "y": y0}, tail, image_width, image_height
+            if not isinstance(voice_source, str):
+                raise ValueError("dialogue voice source must be human or device")
+            tail_geometry = _organic_tail_geometry(
+                bounded | {"x": x0, "y": y0},
+                tail,
+                image_width,
+                image_height,
+                voice_source,
             )
-            _draw_antialiased_balloon(draw, (x0, y0, x1, y1), tail_polygon)
+            _draw_antialiased_balloon(draw, (x0, y0, x1, y1), tail_geometry)
         else:
             _draw_antialiased_balloon(draw, (x0, y0, x1, y1), None)
         assert layout is not None
@@ -782,6 +882,32 @@ def letter_panel(
     for item in ordered:
         if item.get("kind") == "dialogue" and not _known_character(character_bible, item.get("speaker")):
             raise ValueError(f"unknown dialogue character: {item.get('speaker')}")
+        if item.get("kind") == "dialogue":
+            if "tail_target" in item:
+                raise ValueError(
+                    "balloon-tail-migration-required: replace tail_target with "
+                    "explicit voice_source and speaker_anchor"
+                )
+            if item.get("voice_source") not in {"human", "device"}:
+                raise ValueError(
+                    f"text item {item.get('id', 'unknown')} voice_source must be human or device"
+                )
+            speaker_anchor = item.get("speaker_anchor")
+            if (
+                not isinstance(speaker_anchor, list)
+                or len(speaker_anchor) != 2
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or not 0 <= value <= 1
+                    for value in speaker_anchor
+                )
+            ):
+                raise ValueError(
+                    f"text item {item.get('id', 'unknown')} speaker_anchor must be "
+                    "finite normalized coordinates"
+                )
         content = normalize_content(item.get("content", ""))
         limit = {"dialogue": 32, "caption": 45, "sfx": 3}.get(item.get("kind"))
         if limit is None:
@@ -791,13 +917,6 @@ def letter_panel(
         anchor = item.get("anchor", "top-left")
         if anchor not in ANCHORS:
             raise ValueError(f"text item {item.get('id', 'unknown')} has unknown anchor")
-        tail = item.get("tail_target")
-        if isinstance(tail, list) and any(
-            isinstance(value, float) and not math.isfinite(value) for value in tail
-        ):
-            raise ValueError(
-                f"text item {item.get('id', 'unknown')} has a non-finite tail target"
-            )
         item["content"] = content
 
     rendered_text_count = sum(item.get("kind") != "sfx" for item in ordered)
@@ -857,23 +976,23 @@ def letter_panel(
             for run_text, run_font in _styled_font_runs(display, font)
         ]
         tail_geometry = None
-        tail = item.get("tail_target")
+        tail = item.get("speaker_anchor")
+        voice_source = item.get("voice_source")
         if (
             item.get("kind") == "dialogue"
             and isinstance(tail, list)
             and len(tail) == 2
             and all(isinstance(value, (int, float)) for value in tail)
         ):
-            base_one, base_two, target = _ellipse_tail_polygon(
-                rect, tail, panel_width, panel_height
+            if not isinstance(voice_source, str):
+                raise ValueError("dialogue voice source must be human or device")
+            tail_geometry = _organic_tail_geometry(
+                rect,
+                tail,
+                panel_width,
+                panel_height,
+                voice_source,
             )
-            tail_geometry = {
-                "origin": [
-                    round((base_one[0] + base_two[0]) / 2),
-                    round((base_one[1] + base_two[1]) / 2),
-                ],
-                "target": [target[0], target[1]],
-            }
         summary["placements"].append({
             "anchor": selected_anchor,
             "box": {key: int(rect[key]) for key in ("x", "y", "width", "height")},

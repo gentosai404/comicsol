@@ -38,9 +38,10 @@ from test_validation import (  # noqa: E402
     valid_story,
     valid_storyboard,
 )
+from tests.support import bounded_tail_regions  # noqa: E402
 
 
-def valid_page_reviewer_checks():
+def valid_page_reviewer_checks(project: Path, page_number: int):
     return [
         {
             "id": "face-action-obstruction",
@@ -58,7 +59,7 @@ def valid_page_reviewer_checks():
             "evidence": "Reviewer inspected every bubble tail against its intended speaker.",
             "method": "bounded-visual-review",
             "reviewer": "fixture-reviewer",
-            "regions": [{"scope": "all-bubbles"}],
+            "regions": bounded_tail_regions(project, page_number),
         },
         {
             "id": "accidental-text-watermark",
@@ -129,7 +130,7 @@ class FinalArtifactTests(unittest.TestCase):
             self.project,
             1,
             build_page_quality_record(
-                self.project, 1, valid_page_reviewer_checks()
+                self.project, 1, valid_page_reviewer_checks(self.project, 1)
             ),
         )
 
@@ -291,7 +292,7 @@ class GuardedOperationTests(unittest.TestCase):
             self.project,
             1,
             build_page_quality_record(
-                self.project, 1, valid_page_reviewer_checks()
+                self.project, 1, valid_page_reviewer_checks(self.project, 1)
             ),
         )
 
