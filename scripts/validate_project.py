@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import re
 import sys
 import unicodedata
@@ -16,6 +18,9 @@ from typing import Callable, Iterable
 from PIL import Image, UnidentifiedImageError
 
 from project_io import contained_project_path
+from page_quality import validate_page_quality
+from quality_records import PANEL_CHECK_IDS, validate_quality_checks
+from typography import lettering_geometry_hash
 
 from comic_sol import (
     ALL_STATUSES,
@@ -24,6 +29,7 @@ from comic_sol import (
     MARGIN,
     PAGE_HEIGHT,
     PAGE_WIDTH,
+    canonical_artifact_bytes,
     layout_rects,
     rectangles_overlap,
     sha256_file,
@@ -41,6 +47,7 @@ LAYOUTS = {
     "three-horizontal",
     "hero-top-two-bottom",
     "two-top-hero-bottom",
+    "four-grid",
 }
 ANCHORS = {
     "top-left", "top-center", "top-right", "middle-left", "middle-right",
@@ -279,7 +286,7 @@ def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
         if capability.get("status") in {"available", "unavailable"} and capability.get("detected_at") is None:
             _add(issues, path, "capability.detected_at", "is required after capability detection")
 
-    artifacts = _object(root.get("artifacts"), {"story_plan", "character_bible", "storyboard", "qa_report", "pdf", "composition_cache"}, set(), issues, path, "artifacts")
+    artifacts = _object(root.get("artifacts"), {"story_plan", "character_bible", "storyboard", "qa_report", "pdf", "pdf_verification", "composition_cache"}, set(), issues, path, "artifacts")
     if artifacts is not None:
         for name, descriptor in artifacts.items():
             item = _object(descriptor, {"path", "sha256"}, {"path", "sha256"}, issues, path, f"artifacts.{name}")
@@ -612,7 +619,72 @@ def validate_storyboard(
     return _sorted(issues)
 
 
+def _validate_panel_record_v2(data: dict[str, object]) -> list[ValidationIssue]:
+    panel_name = data.get("subject_id") if isinstance(data, dict) else "unknown"
+    path = f"qa/panels/{panel_name}.json"
+    issues: list[ValidationIssue] = []
+    fields = {
+        "schema_version", "kind", "subject_id", "bindings", "checks",
+        "review", "decision", "unresolved_warnings",
+    }
+    root = _object(data, fields, fields, issues, path, "")
+    if root is None:
+        return _sorted(issues)
+    if root.get("schema_version") != "2.0":
+        _add(issues, path, "schema_version", "must equal 2.0")
+    if root.get("kind") != "panel-qa":
+        _add(issues, path, "kind", "must equal panel-qa")
+    subject_id = root.get("subject_id")
+    if not isinstance(subject_id, str) or PANEL_ID_PATTERN.fullmatch(subject_id) is None:
+        _add(issues, path, "subject_id", "must match pNN-NN")
+
+    bindings = root.get("bindings")
+    if not isinstance(bindings, dict):
+        _add(issues, path, "bindings", "must be an object")
+    else:
+        for name, value in sorted(bindings.items()):
+            field = f"bindings.{name}"
+            if name.endswith("_path"):
+                _relative_path(value, issues, path, field)
+            elif name.endswith("_sha256"):
+                _sha256(value, issues, path, field)
+            elif name.endswith(("_width", "_height")):
+                _integer(value, 1, 100_000, issues, path, field)
+            elif name.endswith("_sha256s"):
+                values = _string_list(value, issues, path, field)
+                if values is not None:
+                    for index, digest in enumerate(values):
+                        _sha256(digest, issues, path, f"{field}[{index}]")
+            elif not isinstance(value, (str, int, list)) or isinstance(value, bool):
+                _add(issues, path, field, "must be a string, integer, or array")
+
+    checks = root.get("checks")
+    for category in validate_quality_checks(checks, PANEL_CHECK_IDS):
+        _add(issues, path, f"checks.{category}", category)
+
+    review_fields = {"method", "reviewer", "reviewed_at"}
+    review = _object(root.get("review"), review_fields, review_fields, issues, path, "review")
+    if review is not None:
+        _nonempty_string(review.get("method"), issues, path, "review.method")
+        _nonempty_string(review.get("reviewer"), issues, path, "review.reviewer")
+        _timestamp(review.get("reviewed_at"), issues, path, "review.reviewed_at")
+
+    decision = root.get("decision")
+    if decision not in {"accept", "accept-warning", "regenerate"}:
+        _add(issues, path, "decision", "unknown quality decision")
+    unresolved = _string_list(
+        root.get("unresolved_warnings"), issues, path, "unresolved_warnings"
+    )
+    if decision == "accept-warning" and not unresolved:
+        _add(issues, path, "unresolved_warnings", "accepted warnings must be recorded")
+    if decision == "accept" and unresolved:
+        _add(issues, path, "unresolved_warnings", "accepted record cannot have warnings")
+    return _sorted(issues)
+
+
 def validate_panel_record(data: dict[str, object]) -> list[ValidationIssue]:
+    if isinstance(data, dict) and data.get("schema_version") == "2.0":
+        return _validate_panel_record_v2(data)
     panel_name = data.get("panel_id") if isinstance(data, dict) else "unknown"
     path = f"qa/panels/{panel_name}.json"
     issues: list[ValidationIssue] = []
@@ -784,6 +856,280 @@ def _read_canonical_json(
     return data
 
 
+def validate_panel_provenance(
+    project_dir: Path,
+    record: dict[str, object],
+) -> tuple[ValidationIssue, ...]:
+    """Recompute schema-2.0 panel bindings and reject stale provenance."""
+    panel_id = record.get("subject_id")
+    record_path = f"qa/panels/{panel_id if isinstance(panel_id, str) else 'unknown'}.json"
+    issues: list[ValidationIssue] = []
+    bindings = record.get("bindings")
+
+    def stale(field: str, detail: str) -> None:
+        _add(
+            issues,
+            record_path,
+            f"bindings.{field}",
+            f"quality-record-stale: {detail}",
+        )
+
+    if not isinstance(bindings, dict):
+        stale("bindings", "bindings object is missing")
+        return tuple(_sorted(issues))
+
+    required = {
+        "raw_path", "raw_sha256", "raw_width", "raw_height",
+        "clean_path", "clean_sha256", "clean_width", "clean_height",
+        "normalization_path", "normalization_sha256",
+    }
+    for field in sorted(required - set(bindings)):
+        stale(field, "required provenance binding is missing")
+
+    resolved: dict[str, Path] = {}
+    for prefix in ("raw", "clean", "normalization"):
+        path_field = f"{prefix}_path"
+        value = bindings.get(path_field)
+        if not isinstance(value, str):
+            continue
+        try:
+            path = contained_project_path(project_dir, value, must_exist=True)
+        except (OSError, ValueError):
+            stale(path_field, "bound artifact is missing or outside the project")
+            continue
+        if not path.is_file():
+            stale(path_field, "bound artifact is not a regular file")
+            continue
+        resolved[prefix] = path
+        digest_field = f"{prefix}_sha256"
+        expected = bindings.get(digest_field)
+        if not isinstance(expected, str) or SHA256_PATTERN.fullmatch(expected) is None:
+            stale(digest_field, "bound SHA-256 is invalid")
+        elif sha256_file(path) != expected:
+            stale(digest_field, "bound SHA-256 does not match current bytes")
+
+    for prefix in ("raw", "clean"):
+        path = resolved.get(prefix)
+        if path is None:
+            continue
+        try:
+            with Image.open(path) as image:
+                image.load()
+                actual_size = image.size
+        except (OSError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
+            stale(f"{prefix}_path", "bound raster is unreadable")
+            continue
+        for axis, actual in zip(("width", "height"), actual_size):
+            field = f"{prefix}_{axis}"
+            if field in bindings and bindings.get(field) != actual:
+                stale(field, f"recorded {axis} does not match current raster")
+
+    normalization_path = resolved.get("normalization")
+    if normalization_path is not None:
+        try:
+            normalization = json.loads(normalization_path.read_text("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            stale("normalization_path", "normalization record is unreadable")
+        else:
+            source = normalization.get("source")
+            clean = normalization.get("clean")
+            if not isinstance(source, dict) or not isinstance(clean, dict):
+                stale("normalization_path", "normalization record structure is invalid")
+            else:
+                for field, normalized_value in (
+                    ("raw_path", source.get("path")),
+                    ("raw_sha256", source.get("sha256")),
+                    ("clean_path", clean.get("path")),
+                    ("clean_sha256", clean.get("sha256")),
+                ):
+                    if bindings.get(field) != normalized_value:
+                        stale(field, "binding disagrees with normalization record")
+                for prefix, size in (
+                    ("raw", source.get("size")),
+                    ("clean", clean.get("size")),
+                ):
+                    if not isinstance(size, list) or len(size) != 2:
+                        stale(
+                            "normalization_path",
+                            f"normalization {prefix} size is invalid",
+                        )
+                        continue
+                    for axis, actual in zip(("width", "height"), size):
+                        field = f"{prefix}_{axis}"
+                        if field in bindings and bindings.get(field) != actual:
+                            stale(
+                                field,
+                                "binding disagrees with normalization record",
+                            )
+    return tuple(_sorted(issues))
+
+
+def validate_lettering_provenance(
+    project_dir: Path,
+    panel_id: str,
+) -> tuple[ValidationIssue, ...]:
+    """Recompute typography/lettering bindings and reject invalid geometry."""
+    issues: list[ValidationIssue] = []
+    geometry_relative = f"panels/{panel_id}/lettering.json"
+    typography_relative = f"panels/{panel_id}/typography.json"
+
+    def stale(field: str, detail: str) -> None:
+        _add(
+            issues,
+            geometry_relative,
+            field,
+            f"lettering-record-stale: {detail}",
+        )
+
+    try:
+        geometry_path = contained_project_path(
+            project_dir, geometry_relative, must_exist=True
+        )
+        geometry = json.loads(geometry_path.read_text("utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        stale("geometry.path", "lettering geometry is missing or unreadable")
+        return tuple(_sorted(issues))
+    if not isinstance(geometry, dict):
+        stale("geometry.path", "lettering geometry must be an object")
+        return tuple(_sorted(issues))
+    if geometry.get("panel_id") != panel_id:
+        stale("panel_id", "geometry panel ID does not match its path")
+    if geometry.get("geometry_sha256") != lettering_geometry_hash(geometry):
+        stale("geometry_sha256", "canonical geometry hash does not match")
+
+    try:
+        typography_path = contained_project_path(
+            project_dir, typography_relative, must_exist=True
+        )
+        typography = json.loads(typography_path.read_text("utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        stale("typography.path", "typography preflight is missing or unreadable")
+        typography = None
+    if isinstance(typography, dict):
+        if typography.get("status") != "pass" or typography.get("issues") != []:
+            stale("typography.status", "typography preflight is not a clean pass")
+        glyphs = typography.get("glyphs")
+        if not isinstance(glyphs, list):
+            stale("glyphs", "typography glyph list is missing")
+        else:
+            for glyph in glyphs:
+                if not isinstance(glyph, dict):
+                    stale("glyphs", "typography glyph entry is invalid")
+                    break
+                font_id = glyph.get("font_id")
+                if (
+                    not isinstance(font_id, str)
+                    or not font_id
+                    or font_id == ".notdef"
+                    or "/" in font_id
+                    or "\\" in font_id
+                ):
+                    stale("glyphs.font_id", "glyph resolves to .notdef or a private path")
+                    break
+                if glyph.get("coverage") != "supported" or glyph.get("shaping") != "supported":
+                    stale("glyphs", "glyph coverage or shaping is unsupported")
+                    break
+
+    bindings = geometry.get("bindings")
+    if not isinstance(bindings, dict):
+        stale("bindings", "geometry bindings are missing")
+        bindings = {}
+    for digest_field, path_field in (
+        ("clean_sha256", "clean_path"),
+        ("storyboard_sha256", "storyboard_path"),
+    ):
+        relative = bindings.get(path_field)
+        expected = bindings.get(digest_field)
+        try:
+            artifact = (
+                contained_project_path(project_dir, relative, must_exist=True)
+                if isinstance(relative, str)
+                else None
+            )
+        except (OSError, ValueError):
+            artifact = None
+        if artifact is None or not artifact.is_file():
+            stale(f"bindings.{path_field}", "bound artifact is missing")
+        elif not isinstance(expected, str) or sha256_file(artifact) != expected:
+            stale(f"bindings.{digest_field}", "bound artifact hash does not match")
+
+    if isinstance(typography, dict):
+        typography_hash = hashlib.sha256(
+            canonical_artifact_bytes(typography)
+        ).hexdigest()
+        if bindings.get("typography_sha256") != typography_hash:
+            stale("typography.path", "typography record hash does not match")
+        if bindings.get("font_policy_sha256") != typography.get("font_policy_sha256"):
+            stale("bindings.font_policy_sha256", "font policy hash does not match preflight")
+
+    lettered = geometry.get("lettered")
+    if not isinstance(lettered, dict):
+        stale("lettered", "lettered artifact descriptor is missing")
+    else:
+        relative = lettered.get("path")
+        try:
+            artifact = (
+                contained_project_path(project_dir, relative, must_exist=True)
+                if isinstance(relative, str)
+                else None
+            )
+        except (OSError, ValueError):
+            artifact = None
+        if artifact is None or not artifact.is_file():
+            stale("lettered.path", "lettered image is missing")
+        elif lettered.get("sha256") != sha256_file(artifact):
+            stale("lettered.sha256", "lettered image hash does not match")
+
+    items = geometry.get("items")
+    if not isinstance(items, list):
+        stale("items", "geometry items must be an array")
+    else:
+        orders: list[int] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                stale("items", "geometry item must be an object")
+                continue
+            order = entry.get("reading_order")
+            if not isinstance(order, int) or isinstance(order, bool) or order <= 0:
+                stale("items.reading_order", "reading order must be a positive integer")
+            else:
+                orders.append(order)
+            box = entry.get("box")
+            if (
+                not isinstance(box, dict)
+                or any(
+                    not isinstance(box.get(key), int)
+                    or isinstance(box.get(key), bool)
+                    for key in ("x", "y", "width", "height")
+                )
+                or box.get("width", 0) <= 0
+                or box.get("height", 0) <= 0
+            ):
+                stale("items.box", "item box is missing or non-positive")
+            tail = entry.get("tail")
+            if tail is not None:
+                valid_tail = isinstance(tail, dict)
+                for key in ("origin", "target"):
+                    point = tail.get(key) if isinstance(tail, dict) else None
+                    valid_tail = (
+                        valid_tail
+                        and isinstance(point, list)
+                        and len(point) == 2
+                        and all(
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(value)
+                            for value in (point or [])
+                        )
+                    )
+                if not valid_tail:
+                    stale("items.tail", "tail coordinates must be finite points")
+        if len(orders) != len(set(orders)):
+            stale("items.reading_order", "reading order values must be unique")
+
+    return tuple(_sorted(issues))
+
+
 def _load_artifact(
     project_dir: Path,
     relative_path: str,
@@ -878,6 +1224,90 @@ def require_valid_project(project_dir: Path, stage: str) -> None:
         raise ProjectValidationError(issues)
 
 
+def validate_pdf_verification(
+    project_dir: Path,
+    project_id: str,
+    page_count: int,
+) -> list[ValidationIssue]:
+    """Validate the exported PDF's hash-bound full-content verification record."""
+    relative = "exports/pdf-verification.json"
+    path = project_dir / relative
+    stale_reasons: list[str] = []
+    try:
+        payload = path.read_bytes()
+        record = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        record = None
+        stale_reasons.append("verification record is missing or unreadable")
+
+    if isinstance(record, dict):
+        if record.get("schema_version") != "1.0":
+            stale_reasons.append("schema version is unsupported")
+        if record.get("kind") != "pdf-verification":
+            stale_reasons.append("record kind is invalid")
+        verified_at = record.get("verified_at")
+        if (
+            not isinstance(verified_at, str)
+            or TIMESTAMP_PATTERN.fullmatch(verified_at) is None
+        ):
+            stale_reasons.append("verification timestamp is not ISO 8601 UTC")
+        expected_pdf = f"exports/{project_id}.pdf"
+        if record.get("pdf_path") != expected_pdf:
+            stale_reasons.append("PDF path binding is stale")
+        pdf_path = project_dir / expected_pdf
+        pdf_hash = record.get("pdf_sha256")
+        if (
+            not isinstance(pdf_hash, str)
+            or not SHA256_PATTERN.fullmatch(pdf_hash)
+            or not pdf_path.is_file()
+            or sha256_file(pdf_path) != pdf_hash
+        ):
+            stale_reasons.append("PDF hash binding is stale")
+        if record.get("page_count") != page_count:
+            stale_reasons.append("page count binding is stale")
+
+        sources = record.get("source_pages")
+        if not isinstance(sources, list) or len(sources) != page_count:
+            stale_reasons.append("ordered source page bindings are incomplete")
+        else:
+            for page_number, source in enumerate(sources, 1):
+                expected_page = f"pages/page-{page_number:03d}.png"
+                expected_qa = f"qa/pages/page-{page_number:03d}.json"
+                if not isinstance(source, dict):
+                    stale_reasons.append(f"page {page_number} binding is invalid")
+                    continue
+                if source.get("path") != expected_page:
+                    stale_reasons.append(f"page {page_number} path binding is stale")
+                if source.get("page_qa_path") != expected_qa:
+                    stale_reasons.append(f"page {page_number} QA path binding is stale")
+                if source.get("dimensions") != [PAGE_WIDTH, PAGE_HEIGHT]:
+                    stale_reasons.append(f"page {page_number} dimensions are stale")
+                for binding, current_path in (
+                    ("sha256", project_dir / expected_page),
+                    ("page_qa_sha256", project_dir / expected_qa),
+                ):
+                    expected_hash = source.get(binding)
+                    if (
+                        not isinstance(expected_hash, str)
+                        or not SHA256_PATTERN.fullmatch(expected_hash)
+                        or not current_path.is_file()
+                        or sha256_file(current_path) != expected_hash
+                    ):
+                        stale_reasons.append(
+                            f"page {page_number} {binding} binding is stale"
+                        )
+    elif not stale_reasons:
+        stale_reasons.append("verification record must be an object")
+
+    if not stale_reasons:
+        return []
+    return [ValidationIssue(
+        relative,
+        "pdf-verification-stale",
+        "; ".join(dict.fromkeys(stale_reasons)),
+    )]
+
+
 def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIssue]:
     project_dir = Path(project_dir)
     if stage not in STAGES:
@@ -947,6 +1377,19 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
             if record is None:
                 continue
             issues.extend(validate_panel_record(record))
+            is_quality_v2 = record.get("schema_version") == "2.0"
+            bindings = record.get("bindings") if is_quality_v2 else None
+            if not isinstance(bindings, dict):
+                bindings = {}
+            if not is_quality_v2:
+                _add(
+                    issues,
+                    record_relative,
+                    "quality-migration-required",
+                    "schema 1.0 quality record remains readable but must be reviewed as schema 2.0",
+                )
+            else:
+                issues.extend(validate_panel_provenance(project_dir, record))
             if stage in {"all", "final", "export-ready"}:
                 checks = record.get("checks")
                 has_error_failure = isinstance(checks, list) and any(
@@ -972,28 +1415,33 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                         for warning in unresolved
                         if isinstance(warning, str) and warning.strip()
                     )
-            if record.get("panel_id") != panel_id:
-                _add(issues, record_relative, "panel_id", "must match its storyboard panel")
+            record_panel_id = record.get("subject_id") if is_quality_v2 else record.get("panel_id")
+            if record_panel_id != panel_id:
+                id_field = "subject_id" if is_quality_v2 else "panel_id"
+                _add(issues, record_relative, id_field, "must match its storyboard panel")
             rect = panel.get("rect")
             expected_ratio = None
             if isinstance(rect, dict) and isinstance(rect.get("width"), int) and isinstance(rect.get("height"), int) and rect["height"] > 0:
                 expected_ratio = rect["width"] / rect["height"]
+            raw_path = bindings.get("raw_path") if is_quality_v2 else record.get("raw_path")
+            clean_path = bindings.get("clean_path") if is_quality_v2 else record.get("clean_path")
             raw_size = _validate_raster(
-                project_dir, record.get("raw_path"), record_relative, "raw_path",
+                project_dir, raw_path, record_relative,
+                "bindings.raw_path" if is_quality_v2 else "raw_path",
                 issues, expected_ratio,
             )
             _validate_raster(
-                project_dir, record.get("clean_path"), record_relative, "clean_path",
+                project_dir, clean_path, record_relative,
+                "bindings.clean_path" if is_quality_v2 else "clean_path",
                 issues, expected_ratio,
             )
-            if raw_size is not None:
+            if raw_size is not None and not is_quality_v2:
                 dimensions = record.get("dimensions")
                 if isinstance(dimensions, dict) and (
                     dimensions.get("width"), dimensions.get("height")
                 ) != raw_size:
                     _add(issues, record_relative, "dimensions", "must match the raw image")
-            raw_path = record.get("raw_path")
-            raw_hash = record.get("raw_sha256")
+            raw_hash = bindings.get("raw_sha256") if is_quality_v2 else record.get("raw_sha256")
             if isinstance(raw_path, str) and isinstance(raw_hash, str):
                 try:
                     image_path = _contained_project_path(project_dir, raw_path)
@@ -1005,8 +1453,27 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                             project_dir, raw_path, must_exist=True
                         )
                         if sha256_file(image_path) != raw_hash:
-                            _add(issues, record_relative, "raw_sha256", "hash does not match the raw image")
-            prompt_path = record.get("source_prompt_path")
+                            hash_field = "bindings.raw_sha256" if is_quality_v2 else "raw_sha256"
+                            _add(issues, record_relative, hash_field, "hash does not match the raw image")
+            clean_hash = bindings.get("clean_sha256") if is_quality_v2 else None
+            if is_quality_v2 and isinstance(clean_path, str) and isinstance(clean_hash, str):
+                try:
+                    clean_file = _contained_project_path(project_dir, clean_path)
+                except ValueError:
+                    pass
+                else:
+                    if clean_file.is_file() and SHA256_PATTERN.fullmatch(clean_hash):
+                        clean_file = contained_project_path(
+                            project_dir, clean_path, must_exist=True
+                        )
+                        if sha256_file(clean_file) != clean_hash:
+                            _add(
+                                issues,
+                                record_relative,
+                                "bindings.clean_sha256",
+                                "hash does not match the clean image",
+                            )
+            prompt_path = None if is_quality_v2 else record.get("source_prompt_path")
             if isinstance(prompt_path, str):
                 try:
                     prompt_file = _contained_project_path(project_dir, prompt_path)
@@ -1015,7 +1482,7 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                 else:
                     if not prompt_file.is_file():
                         _add(issues, record_relative, "source_prompt_path", "referenced prompt is missing")
-            generation = record.get("generation")
+            generation = None if is_quality_v2 else record.get("generation")
             if isinstance(generation, dict):
                 for reference_index, reference_path in enumerate(generation.get("reference_paths", [])):
                     _validate_raster(
@@ -1130,29 +1597,40 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
             page_qa = _read_canonical_json(project_dir, page_qa_relative, issues)
             expected_page = f"pages/page-{page_number:03d}.png"
             if page_qa is not None:
-                issues.extend(validate_page_qa_record(page_qa))
-                if page_qa.get("page") != page_number:
-                    _add(issues, page_qa_relative, "page",
-                         "must match the canonical page number")
-                if page_qa.get("page_path") != expected_page:
-                    _add(issues, page_qa_relative, "page_path",
-                         "must match the canonical page path")
+                if page_qa.get("schema_version") == "2.0":
+                    for issue in validate_page_quality(project_dir, page_number):
+                        _add(issues, issue.path, issue.field, issue.message)
+                else:
+                    issues.extend(validate_page_qa_record(page_qa))
+                    _add(
+                        issues,
+                        page_qa_relative,
+                        "schema_version",
+                        "quality-migration-required: schema 1.0 page QA must be migrated",
+                    )
+                    if page_qa.get("page") != page_number:
+                        _add(issues, page_qa_relative, "page",
+                             "must match the canonical page number")
+                    if page_qa.get("page_path") != expected_page:
+                        _add(issues, page_qa_relative, "page_path",
+                             "must match the canonical page path")
             page_path = project_dir / expected_page
             if not page_path.is_file():
                 _add(issues, expected_page, "", "composed page is missing")
-            else:
+            elif page_qa is not None and page_qa.get("schema_version") != "2.0":
                 page_hash = sha256_file(page_path)
-                if page_qa is not None and isinstance(page_qa.get("page_sha256"), str):
+                if isinstance(page_qa.get("page_sha256"), str):
                     if page_qa["page_sha256"] != page_hash:
                         _add(issues, page_qa_relative, "page_sha256",
                              "hash does not match the page image")
 
-        # Lettered panels.
+        # Lettered panels and their current typography/geometry provenance.
         for panel_id in panels:
             lettered = project_dir / f"panels/{panel_id}/lettered.png"
             if not lettered.is_file():
                 _add(issues, f"panels/{panel_id}/lettered.png", "",
                      "lettered panel is missing")
+            issues.extend(validate_lettering_provenance(project_dir, panel_id))
 
         # export-ready does not require report, PDF, or export cache.
         if stage != "export-ready":
@@ -1166,6 +1644,9 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
                 if not pdf_path.is_file():
                     _add(issues, f"exports/{project_id}.pdf", "",
                          "exported PDF is missing")
+                issues.extend(
+                    validate_pdf_verification(project_dir, project_id, page_count)
+                )
 
         # Composition cache required.
         comp_cache = project_dir / "cache/composition.json"
@@ -1178,7 +1659,7 @@ def validate_project(project_dir: Path, stage: str = "all") -> list[ValidationIs
 
 REQUIRED_ARTIFACT_DESCRIPTORS = frozenset({
     "character_bible", "story_plan", "storyboard",
-    "qa_report", "pdf",
+    "qa_report", "pdf", "pdf_verification",
 })
 
 
@@ -1198,7 +1679,7 @@ def _validate_required_artifacts(
         "character_bible", "story_plan", "storyboard", "composition_cache",
     }
     if require_terminal:
-        required.update({"qa_report", "pdf"})
+        required.update({"qa_report", "pdf", "pdf_verification"})
     for name in sorted(required):
         if name not in artifacts:
             _add(issues, "project.json", f"artifacts.{name}",
@@ -1216,6 +1697,7 @@ def _validate_required_artifacts(
             expected_paths.update({
                 "qa_report": "qa/report.md",
                 "pdf": f"exports/{project_id}.pdf",
+                "pdf_verification": "exports/pdf-verification.json",
             })
     for name, expected in expected_paths.items():
         descriptor = artifacts.get(name)

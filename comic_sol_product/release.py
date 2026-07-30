@@ -12,6 +12,13 @@ from typing import Iterable
 REQUIRED_WHEEL_MEMBERS = frozenset(
     {
         "comic_sol_product/engine/comic_sol.py",
+        "comic_sol_product/engine/quality_records.py",
+        "comic_sol_product/engine/normalize_panels.py",
+        "comic_sol_product/engine/typography.py",
+        "comic_sol_product/engine/layouts.py",
+        "comic_sol_product/engine/page_quality.py",
+        "comic_sol_product/engine/pdf_quality.py",
+        "comic_sol_product/engine/quality_sample.py",
         "comic_sol_product/assets/fonts/ComicNeue-Regular.ttf",
         "comic_sol_product/assets/fonts/ComicNeue-Bold.ttf",
         "comic_sol_product/templates/manifest.json",
@@ -39,6 +46,9 @@ FORBIDDEN_WHEEL_MEMBERS = frozenset(
         "comic_sol_product/engine/clean_install_smoke.py",
         "comic_sol_product/engine/installed_mcp_smoke.py",
         "comic_sol_product/engine/portable_release_smoke.py",
+        "comic_sol_product/engine/test_quality_matrix.py",
+        "comic_sol_product/engine/support.py",
+        "comic_sol_product/engine/quality-matrix/README.md",
     }
 )
 

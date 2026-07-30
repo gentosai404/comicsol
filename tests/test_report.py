@@ -172,6 +172,102 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Reused: panels/raw/p01-01.png", text)
         self.assertIn("Regenerated: panels/raw/p01-03.png", text)
 
+    def test_report_labels_deterministic_evidence_as_mechanics_only(self):
+        atomic_write_json(
+            self.project / "qa/evidence.json",
+            {
+                "mode": "deterministic",
+                "scope": "mechanics-only",
+                "proves_visual_quality": False,
+            },
+        )
+        text = render_report(self.project).read_text("utf-8")
+        self.assertIn("Evidence provenance", text)
+        self.assertIn("deterministic", text)
+        self.assertIn("mechanics-only", text)
+        self.assertIn("does not prove live visual quality", text)
+
+    def test_report_discloses_retained_live_visual_provenance(self):
+        atomic_write_json(
+            self.project / "qa/evidence.json",
+            {
+                "mode": "live-visual",
+                "scope": "retained-attempt-visual-review",
+                "proves_visual_quality": True,
+                "retained_attempt": "panels/raw/p01-01/attempt-001.png",
+                "attempt_sha256": "a" * 64,
+                "provider": "local-test-provider",
+                "model": "test-model-v1",
+                "references": ["references/characters/mira.png"],
+                "reviewer_method": "bounded-visual-review",
+                "limitations": ["synthetic fixture"],
+            },
+        )
+        text = render_report(self.project).read_text("utf-8")
+        for phrase in (
+            "live-visual",
+            "local-test-provider",
+            "test-model-v1",
+            "attempt-001.png",
+            "a" * 64,
+            "references/characters/mira.png",
+            "bounded-visual-review",
+            "synthetic fixture",
+        ):
+            self.assertIn(phrase, text)
+
+    def test_report_discloses_page_layout_and_check_method_identity(self):
+        page_dir = self.project / "qa/pages"
+        page_dir.mkdir(parents=True, exist_ok=True)
+        checks = []
+        for check_id in (
+            "clipped-text", "text-overlap", "face-action-obstruction",
+            "bubble-tail-direction", "reading-order",
+            "accidental-text-watermark", "layout-border-integrity",
+        ):
+            deterministic = check_id in {
+                "clipped-text", "text-overlap", "reading-order",
+                "layout-border-integrity",
+            }
+            checks.append({
+                "id": check_id,
+                "result": "pass",
+                "severity": "error",
+                "evidence": f"Bounded evidence for {check_id}.",
+                "method": (
+                    "deterministic-geometry-v1"
+                    if deterministic else "bounded-visual-review"
+                ),
+                "reviewer": "comic-sol" if deterministic else "fixture-reviewer",
+                "regions": [{"scope": "page"}],
+            })
+        atomic_write_json(page_dir / "page-001.json", {
+            "bindings": {
+                "layout_name": "four-grid",
+                "layout_version": "1",
+                "page_path": "pages/page-001.png",
+                "page_sha256": "a" * 64,
+            },
+            "checks": checks,
+            "decision": "accept",
+            "kind": "page-qa",
+            "review": {
+                "method": "deterministic-plus-bounded-visual-review",
+                "reviewed_at": "fixture",
+                "reviewer": "fixture-reviewer",
+            },
+            "schema_version": "2.0",
+            "subject_id": "page-001",
+            "unresolved_warnings": [],
+        })
+
+        text = render_report(self.project).read_text("utf-8")
+        self.assertIn("Page QA", text)
+        self.assertIn("four-grid", text)
+        self.assertIn("deterministic-geometry-v1", text)
+        self.assertIn("bounded-visual-review", text)
+        self.assertIn("face-action-obstruction", text)
+
     def test_absent_warnings_use_exact_sentence(self):
         for path in (self.project / "qa/panels").glob("*.json"):
             record = read_json(path)
@@ -238,6 +334,19 @@ class ReportFixtureIntegrationTests(unittest.TestCase):
             project = Path(temporary) / "project"
             shutil.copytree(ROOT / "tests/fixtures/valid-one-page", project)
             self.assertIn("No unresolved warnings", render_report(project).read_text("utf-8"))
+
+    def test_report_discloses_normalization_without_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            shutil.copytree(ROOT / "tests/fixtures/valid-one-page", project)
+            text = render_report(project).read_text("utf-8")
+
+            self.assertIn("## Panel normalization", text)
+            self.assertIn("| p01-01 | exact | 736×588 | 736×588 |", text)
+            self.assertIn("| p01-02 | exact | 720×1064 | 720×1064 |", text)
+            self.assertNotIn(str(project), text)
+            self.assertNotIn(str(Path.home()), text)
+            self.assertNotIn("prompts/panels", text)
 
 
 if __name__ == "__main__":

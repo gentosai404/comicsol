@@ -37,8 +37,19 @@ class QaSummary:
 
 
 def _attempts(record: dict[str, object]) -> int:
-    value = record.get("attempts", 0)
+    bindings = record.get("bindings")
+    value = (
+        bindings.get("attempts", 0)
+        if record.get("schema_version") == "2.0" and isinstance(bindings, dict)
+        else record.get("attempts", 0)
+    )
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _panel_id(record: dict[str, object]) -> str | None:
+    field = "subject_id" if record.get("schema_version") == "2.0" else "panel_id"
+    value = record.get(field)
+    return value if isinstance(value, str) and value else None
 
 
 def _has_error_failure(record: dict[str, object]) -> bool:
@@ -69,7 +80,8 @@ def summarize_qa(
         generation_attempts=sum(_attempts(record) for record in panel_records),
         regenerated_panels=sum(_attempts(record) > 1 for record in panel_records),
         accepted_warnings=sum(
-            record.get("decision") == "accept_with_warnings" for record in panel_records
+            record.get("decision") in {"accept-warning", "accept_with_warnings"}
+            for record in panel_records
         ),
         hard_failures=sum(
             record.get("failure_category") in hard_categories
@@ -93,10 +105,23 @@ def _load_records(project_dir: Path) -> list[dict[str, object]]:
         return records
     for path in panel_dir.glob("*.json"):
         record = read_json(path)
-        if not isinstance(record.get("panel_id"), str):
-            raise ValueError(f"panel record has no panel_id: {path}")
+        if _panel_id(record) is None:
+            raise ValueError(f"panel record has no panel identity: {path}")
         records.append(record)
-    records.sort(key=lambda record: str(record["panel_id"]))
+    records.sort(key=lambda record: _panel_id(record) or "")
+    return records
+
+
+def _load_page_records(project_dir: Path) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    page_dir = project_dir / "qa/pages"
+    if not page_dir.is_dir():
+        return records
+    for path in page_dir.glob("page-*.json"):
+        record = read_json(path)
+        if record.get("schema_version") == "2.0" and record.get("kind") == "page-qa":
+            records.append(record)
+    records.sort(key=lambda record: str(record.get("subject_id", "")))
     return records
 
 
@@ -156,6 +181,53 @@ def _counts(summary: QaSummary) -> str:
     ))
 
 
+def _evidence_provenance(project_dir: Path) -> str:
+    path = project_dir / "qa/evidence.json"
+    if not path.is_file():
+        return (
+            "- Mode: unavailable\n"
+            "- Scope: no explicit evidence provenance record was supplied."
+        )
+    record = read_json(path)
+    mode = record.get("mode")
+    if mode == "deterministic":
+        return "\n".join((
+            "- Mode: deterministic",
+            f"- Scope: {record.get('scope', 'mechanics-only')}",
+            "- Claim boundary: deterministic evidence proves mechanics only and "
+            "does not prove live visual quality.",
+        ))
+    if mode != "live-visual":
+        raise ValueError("qa/evidence.json has an unsupported evidence mode")
+
+    required = (
+        "retained_attempt", "attempt_sha256", "provider", "model",
+        "reviewer_method",
+    )
+    if any(
+        not isinstance(record.get(name), str) or not record[name]
+        for name in required
+    ):
+        raise ValueError("qa/evidence.json live-visual provenance is incomplete")
+
+    def joined(name: str) -> str:
+        values = record.get(name)
+        if not isinstance(values, list):
+            return "none"
+        return ", ".join(_escape_table(value) for value in values) or "none"
+
+    return "\n".join((
+        "- Mode: live-visual",
+        f"- Scope: {_escape_table(record.get('scope', 'retained-attempt-visual-review'))}",
+        f"- Provider/model: {_escape_table(record['provider'])} / {_escape_table(record['model'])}",
+        f"- Retained attempt: `{_escape_table(record['retained_attempt'])}`",
+        f"- Attempt SHA-256: `{_escape_table(record['attempt_sha256'])}`",
+        f"- References: {joined('references')}",
+        f"- Reviewer method: {_escape_table(record['reviewer_method'])}",
+        f"- Known limitations: {joined('limitations')}",
+    ))
+
+
 def _panel_table(records: list[dict[str, object]]) -> str:
     headings = ("Panel", "Attempts", "Decision", *CHECK_IDS, "Evidence")
     lines = [
@@ -185,10 +257,95 @@ def _panel_table(records: list[dict[str, object]]) -> str:
             for check_id in CHECK_IDS if check_id in check_map
         )
         cells = (
-            record.get("panel_id", "unknown"), _attempts(record), decision,
+            _panel_id(record) or "unknown", _attempts(record), decision,
             *results, evidence,
         )
         lines.append("| " + " | ".join(_escape_table(cell) for cell in cells) + " |")
+    return "\n".join(lines)
+
+
+def _normalization_table(
+    project_dir: Path,
+    records: list[dict[str, object]],
+) -> str:
+    headings = ("Panel", "Mode", "Source", "Target")
+    lines = [
+        "| " + " | ".join(headings) + " |",
+        "| " + " | ".join("---" for _ in headings) + " |",
+    ]
+    for record in records:
+        panel_id = _panel_id(record) or "unknown"
+        bindings = record.get("bindings")
+        relative = (
+            bindings.get("normalization_path")
+            if isinstance(bindings, dict)
+            else None
+        )
+        path = _contained_or_none(project_dir, relative)
+        mode = source_size = target_size = "unavailable"
+        if path is not None and path.is_file():
+            try:
+                normalization = read_json(path)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                normalization = {}
+            source = normalization.get("source")
+            operation = normalization.get("operation")
+            target = normalization.get("target_size")
+            if isinstance(operation, dict) and isinstance(operation.get("mode"), str):
+                mode = operation["mode"]
+            source_value = source.get("size") if isinstance(source, dict) else None
+            if (
+                isinstance(source_value, list)
+                and len(source_value) == 2
+                and all(isinstance(value, int) for value in source_value)
+            ):
+                source_size = f"{source_value[0]}×{source_value[1]}"
+            if (
+                isinstance(target, list)
+                and len(target) == 2
+                and all(isinstance(value, int) for value in target)
+            ):
+                target_size = f"{target[0]}×{target[1]}"
+        lines.append(
+            "| " + " | ".join(
+                _escape_table(value)
+                for value in (panel_id, mode, source_size, target_size)
+            ) + " |"
+        )
+    return "\n".join(lines)
+
+
+def _page_qa_table(records: list[dict[str, object]]) -> str:
+    headings = ("Page", "Layout", "Check", "Result", "Method", "Reviewer")
+    lines = [
+        "| " + " | ".join(headings) + " |",
+        "| " + " | ".join("---" for _ in headings) + " |",
+    ]
+    for record in records:
+        bindings = record.get("bindings")
+        layout = bindings.get("layout_name", "unknown") if isinstance(bindings, dict) else "unknown"
+        version = bindings.get("layout_version", "unknown") if isinstance(bindings, dict) else "unknown"
+        checks = record.get("checks")
+        if not isinstance(checks, list):
+            checks = []
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            cells = (
+                record.get("subject_id", "unknown"),
+                f"{layout} v{version}",
+                check.get("id", "unknown"),
+                check.get("result", "missing"),
+                check.get("method", "missing"),
+                check.get("reviewer", "missing"),
+            )
+            lines.append(
+                "| " + " | ".join(_escape_table(cell) for cell in cells) + " |"
+            )
+    if len(lines) == 2:
+        lines.append(
+            "| none | unavailable | unavailable | unavailable | unavailable | unavailable |"
+        )
     return "\n".join(lines)
 
 
@@ -204,7 +361,7 @@ def _warnings(
             sources.append(source)
 
     for record in records:
-        panel_id = str(record.get("panel_id", "unknown"))
+        panel_id = _panel_id(record) or "unknown"
         values = record.get("unresolved_warnings", [])
         if isinstance(values, list):
             for value in values:
@@ -354,17 +511,21 @@ def _resume(project_dir: Path) -> str:
 
 
 def render_report(project_dir: Path, output_path: Path | None = None) -> Path:
-    """Render all seven QA sections and atomically publish UTF-8 Markdown."""
+    """Render structured QA sections and atomically publish UTF-8 Markdown."""
     project_dir = Path(project_dir)
     manifest = read_json(project_dir / "project.json")
     records = _load_records(project_dir)
+    page_records = _load_page_records(project_dir)
     summary = summarize_qa(manifest, records)
     template = TEMPLATE_PATH.read_text("utf-8")
     replacements = {
         "{{PROJECT_SUMMARY}}": _project_summary(manifest),
         "{{CAPABILITY}}": _capability(manifest),
         "{{COUNTS}}": _counts(summary),
+        "{{EVIDENCE_PROVENANCE}}": _evidence_provenance(project_dir),
         "{{PANEL_TABLE}}": _panel_table(records),
+        "{{NORMALIZATION_TABLE}}": _normalization_table(project_dir, records),
+        "{{PAGE_QA_TABLE}}": _page_qa_table(page_records),
         "{{WARNINGS}}": _warnings(manifest, records),
         "{{INTEGRITY}}": _integrity(project_dir, manifest, records),
         "{{RESUME}}": _resume(project_dir),
