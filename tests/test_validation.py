@@ -952,9 +952,10 @@ class PackagingTests(unittest.TestCase):
     def test_public_surface_uses_the_canonical_independent_repository(self):
         readme = self.readme()
         workflow = (ROOT / ".github/workflows/tests.yml").read_text("utf-8")
-        self.assertIn("https://github.com/wenn-id/comic-sol-lab", readme)
+        self.assertIn("https://github.com/wenn-id/comicsol", readme)
         self.assertIn("canonical, independent home", readme)
         self.assertNotIn("https://github.com/wenn-id/comic-sol.git", readme)
+        self.assertNotIn("comic-sol-lab", readme)
         self.assertIn("branches: [ main ]", workflow)
         self.assertNotIn("ai/post-event-development", workflow)
         for name in ("CONTRIBUTING.md", "SECURITY.md"):

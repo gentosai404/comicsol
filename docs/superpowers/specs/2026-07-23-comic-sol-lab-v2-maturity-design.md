@@ -4,7 +4,7 @@
 
 **Status:** Approved design; Integrity Core implementation plan complete
 
-**Repository:** `wenn-id/comic-sol-lab` (private)
+**Repository:** `wenn-id/comicsol` (then private; now public)
 
 **Development branch:** `ai/post-event-development`
 

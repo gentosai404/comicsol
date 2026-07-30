@@ -8,7 +8,7 @@ The latest published prerelease or stable release receives security fixes. Older
 
 Do not open a public issue for a vulnerability, leaked credential, unsafe archive behavior, path-containment bypass, arbitrary file write, or dependency compromise.
 
-Use GitHub's private vulnerability reporting for `wenn-id/comic-sol-lab` when available. If that interface is unavailable, contact the repository owner privately through the contact method shown on the owner's GitHub profile and include:
+Use GitHub's private vulnerability reporting for `wenn-id/comicsol` when available. If that interface is unavailable, contact the repository owner privately through the contact method shown on the owner's GitHub profile and include:
 
 - affected version or commit;
 - reproduction steps and impact;
