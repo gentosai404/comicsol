@@ -963,19 +963,34 @@ class PackagingTests(unittest.TestCase):
 
     def test_readme_badges_report_live_project_contracts(self):
         readme = self.readme()
-        for badge in (
-            "actions/workflows/tests.yml/badge.svg?branch=main",
-            "img.shields.io/github/v/release/wenn-id/comicsol?include_prereleases&label=release",
-            "img.shields.io/github/license/wenn-id/comicsol",
-            "img.shields.io/badge/Python-3.11-3776AB",
-            "img.shields.io/badge/MCP_tools-17-brightgreen",
-            "img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue",
-        ):
-            self.assertIn(badge, readme)
-        self.assertLess(
-            readme.index("actions/workflows/tests.yml/badge.svg"),
-            readme.index("Comic Sol is an installable"),
-        )
+        preamble, separator, _ = readme.partition("Comic Sol is an installable")
+        self.assertTrue(separator, "README product introduction is missing")
+        badges = set(re.findall(r"\[!\[([^]]+)\]\(([^)]+)\)\]\(([^)]+)\)", preamble))
+        expected = {
+            (
+                "Tests",
+                "https://github.com/wenn-id/comicsol/actions/workflows/tests.yml/badge.svg?branch=main",
+                "https://github.com/wenn-id/comicsol/actions/workflows/tests.yml",
+            ),
+            (
+                "Release",
+                "https://img.shields.io/github/v/release/wenn-id/comicsol?include_prereleases&label=release",
+                "https://github.com/wenn-id/comicsol/releases",
+            ),
+            ("License", "https://img.shields.io/github/license/wenn-id/comicsol", "LICENSE"),
+            (
+                "Python",
+                "https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white",
+                "https://www.python.org/",
+            ),
+            ("MCP tools", "https://img.shields.io/badge/MCP_tools-17-brightgreen", "#mcp-server-optional"),
+            (
+                "Platforms",
+                "https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue",
+                "docs/install.md",
+            ),
+        }
+        self.assertEqual(expected, badges)
 
     def test_package_files_install_and_artifact_contract_are_documented(self):
         for name in ("LICENSE", "README.md", "SKILL.md"):
