@@ -2,9 +2,8 @@ name: Tests
 
 on:
   push:
-    branches: [ main, ai/post-event-development ]
-  # Every pull request, whatever its base. Restricting this to `main` meant the
-  # suite never ran in a repository whose default branch is not `main`.
+    branches: [ main ]
+  # Validate every pull request; `main` is the canonical public product branch.
   pull_request:
 
 jobs:
