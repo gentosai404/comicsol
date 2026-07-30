@@ -233,6 +233,19 @@ class TypographyLetteringIntegrationTests(unittest.TestCase):
             ))
             self.assertTrue(placed["font_runs"])
             self.assertTrue(all("/" not in run["font_id"] for run in placed["font_runs"]))
+            if placed["kind"] == "dialogue":
+                tail = placed["tail"]
+                self.assertEqual("organic-cubic-v1", tail["policy_version"])
+                self.assertEqual("human", tail["voice_source"])
+                self.assertEqual(
+                    {
+                        "attachment", "base", "control", "length", "policy_version",
+                        "source_gap", "speaker_anchor", "tip", "voice_source", "width",
+                    },
+                    set(tail),
+                )
+            else:
+                self.assertIsNone(placed["tail"])
             self.assertEqual(
                 json.dumps(geometry, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                 geometry_path.read_text("utf-8"),
@@ -324,7 +337,18 @@ class LetteringProvenanceTests(unittest.TestCase):
             ("bindings.font_policy_sha256", lambda g, t: g["bindings"].update(font_policy_sha256="0" * 64)),
             ("items.reading_order", lambda g, t: g["items"].append(dict(g["items"][0]))),
             ("items.box", lambda g, t: g["items"][0].update(box={"x": 1, "y": 1, "width": 0, "height": 2})),
-            ("items.tail", lambda g, t: g["items"][0].update(tail={"origin": [1, 2], "target": [float("inf"), 3]})),
+            (
+                "items.tail",
+                lambda g, t: g["items"][0]["tail"]["control"][0][0].__setitem__(
+                    0, float("inf")
+                ),
+            ),
+            (
+                "items.tail",
+                lambda g, t: g["items"][0].update(
+                    tail={"origin": [1, 2], "target": [3, 4]}
+                ),
+            ),
             ("glyphs.font_id", lambda g, t: t["glyphs"][0].update(font_id=".notdef")),
         )
         for field, mutate in cases:

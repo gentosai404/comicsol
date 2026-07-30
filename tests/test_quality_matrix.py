@@ -21,7 +21,7 @@ from comic_sol import (
 from normalize_panels import normalize_panel
 from page_quality import build_page_quality_record, write_page_quality_record
 from quality_sample import EvidenceModeError, build_evidence_record, main
-from tests.support import QUALITY_SCENARIOS, build_quality_fixture
+from tests.support import QUALITY_SCENARIOS, bounded_tail_regions, build_quality_fixture
 from tests.test_validation import (
     valid_characters,
     valid_manifest,
@@ -74,7 +74,7 @@ def tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
-def page_reviewer_checks():
+def page_reviewer_checks(project: Path, page_number: int):
     return [
         {
             "id": "face-action-obstruction",
@@ -92,7 +92,7 @@ def page_reviewer_checks():
             "evidence": "Reviewer inspected every bubble tail against its intended speaker.",
             "method": "bounded-visual-review",
             "reviewer": "matrix-reviewer",
-            "regions": [{"scope": "all-bubbles"}],
+            "regions": bounded_tail_regions(project, page_number),
         },
         {
             "id": "accidental-text-watermark",
@@ -272,7 +272,7 @@ class DeterministicLifecycleTests(unittest.TestCase):
             write_page_quality_record(
                 project,
                 1,
-                build_page_quality_record(project, 1, page_reviewer_checks()),
+                build_page_quality_record(project, 1, page_reviewer_checks(project, 1)),
             )
             result = finalize_project(project)
 
@@ -295,7 +295,7 @@ class DeterministicLifecycleTests(unittest.TestCase):
             write_page_quality_record(
                 project,
                 1,
-                build_page_quality_record(project, 1, page_reviewer_checks()),
+                build_page_quality_record(project, 1, page_reviewer_checks(project, 1)),
             )
             first_result = finalize_project(project)
             pdf = project / first_result["pdf"]

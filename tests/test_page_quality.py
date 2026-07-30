@@ -29,8 +29,8 @@ SUBJECTIVE = {
 }
 
 
-def reviewer_checks():
-    return [
+def reviewer_checks(project=None):
+    checks = [
         {
             "id": check_id,
             "result": "pass",
@@ -42,6 +42,33 @@ def reviewer_checks():
         }
         for check_id in sorted(SUBJECTIVE)
     ]
+    if project is None:
+        return checks
+
+    storyboard = json.loads((project / "plan/storyboard.json").read_text("utf-8"))
+    regions = []
+    for panel in storyboard["pages"][0]["panels"]:
+        geometry = json.loads(
+            (project / f"panels/{panel['id']}/lettering.json").read_text("utf-8")
+        )
+        geometry_by_id = {item["id"]: item for item in geometry["items"]}
+        for item in panel["text"]:
+            if item["kind"] != "dialogue":
+                continue
+            tail = geometry_by_id[item["id"]]["tail"]
+            regions.append({
+                "panel_id": panel["id"],
+                "text_id": item["id"],
+                "speaker": item["speaker"],
+                "voice_source": item["voice_source"],
+                "speaker_anchor": item["speaker_anchor"],
+                "tip": tail["tip"],
+                "result": "pass",
+            })
+    next(check for check in checks if check["id"] == "bubble-tail-direction")[
+        "regions"
+    ] = regions
+    return checks
 
 
 class PageQualityTests(unittest.TestCase):
@@ -69,7 +96,7 @@ class PageQualityTests(unittest.TestCase):
             DETERMINISTIC_PAGE_CHECK_IDS,
         )
 
-        record = build_page_quality_record(self.project, 1, reviewer_checks())
+        record = build_page_quality_record(self.project, 1, reviewer_checks(self.project))
         checks = {check["id"]: check for check in record["checks"]}
         self.assertEqual(set(PAGE_CHECK_IDS), set(checks))
         for check_id in DETERMINISTIC_PAGE_CHECK_IDS:
@@ -83,13 +110,30 @@ class PageQualityTests(unittest.TestCase):
     def test_missing_or_generic_subjective_evidence_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "subjective page checks"):
             build_page_quality_record(self.project, 1, [])
-        generic = reviewer_checks()
+        generic = reviewer_checks(self.project)
         generic[0]["evidence"] = "ok"
         with self.assertRaisesRegex(ValueError, "quality-evidence-generic"):
             build_page_quality_record(self.project, 1, generic)
 
+    def test_tail_direction_requires_one_current_region_per_dialogue(self):
+        missing = reviewer_checks(self.project)
+        tail_check = next(
+            check for check in missing if check["id"] == "bubble-tail-direction"
+        )
+        tail_check["regions"] = []
+        with self.assertRaisesRegex(ValueError, "bubble-tail-evidence-mismatch"):
+            build_page_quality_record(self.project, 1, missing)
+
+        stale = reviewer_checks(self.project)
+        tail_check = next(
+            check for check in stale if check["id"] == "bubble-tail-direction"
+        )
+        tail_check["regions"][0]["tip"][0] += 1
+        with self.assertRaisesRegex(ValueError, "bubble-tail-evidence-mismatch"):
+            build_page_quality_record(self.project, 1, stale)
+
     def test_record_binds_page_cache_layout_storyboard_and_ordered_lettering(self):
-        record = build_page_quality_record(self.project, 1, reviewer_checks())
+        record = build_page_quality_record(self.project, 1, reviewer_checks(self.project))
         bindings = record["bindings"]
         self.assertEqual("2.0", record["schema_version"])
         self.assertEqual("page-qa", record["kind"])
@@ -106,7 +150,7 @@ class PageQualityTests(unittest.TestCase):
                             for value in bindings["lettering_sha256s"]))
 
     def test_write_is_canonical_and_current_record_validates(self):
-        record = build_page_quality_record(self.project, 1, reviewer_checks())
+        record = build_page_quality_record(self.project, 1, reviewer_checks(self.project))
         path = write_page_quality_record(self.project, 1, record)
         self.assertEqual((self.project / "qa/pages/page-001.json").resolve(), path)
         loaded = json.loads(path.read_text("utf-8"))
@@ -118,7 +162,7 @@ class PageQualityTests(unittest.TestCase):
         self.assertEqual((), validate_page_quality(self.project, 1))
 
     def test_page_cache_storyboard_layout_and_lettering_drift_are_stale(self):
-        record = build_page_quality_record(self.project, 1, reviewer_checks())
+        record = build_page_quality_record(self.project, 1, reviewer_checks(self.project))
         write_page_quality_record(self.project, 1, record)
         cases = (
             ("pages/page-001.png", "bindings.page_sha256", "append"),
@@ -161,7 +205,7 @@ class PageQualityTests(unittest.TestCase):
             json.dumps(geometry, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             "utf-8",
         )
-        record = build_page_quality_record(self.project, 1, reviewer_checks())
+        record = build_page_quality_record(self.project, 1, reviewer_checks(self.project))
         checks = {check["id"]: check for check in record["checks"]}
         self.assertEqual("fail", checks["clipped-text"]["result"])
         self.assertEqual("fail", checks["text-overlap"]["result"])
@@ -169,7 +213,7 @@ class PageQualityTests(unittest.TestCase):
         self.assertEqual("regenerate", record["decision"])
 
     def test_export_ready_gate_requires_current_schema_two_page_quality(self):
-        record = build_page_quality_record(self.project, 1, reviewer_checks())
+        record = build_page_quality_record(self.project, 1, reviewer_checks(self.project))
         write_page_quality_record(self.project, 1, record)
         current = validate_project(self.project, "export-ready")
         self.assertFalse(any(

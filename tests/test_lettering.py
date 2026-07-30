@@ -388,21 +388,31 @@ class LetteringTests(unittest.TestCase):
         self.assertTrue(any(max(image.getpixel((x, 40))) < 80 for x in range(32, 370)))
 
     def test_dialogue_tail_attachment_has_no_internal_seam(self):
-        from letter_panels import _ellipse_tail_polygon
+        from letter_panels import _organic_tail_geometry
 
         image = Image.new("RGB", (240, 240), (96, 96, 96))
         draw = ImageDraw.Draw(image)
         rect = {"x": 40, "y": 30, "width": 120, "height": 70}
         item = dialogue("Hi")
         item["speaker_anchor"] = [0.8, 0.8]
-        base_one, base_two, _ = _ellipse_tail_polygon(rect, item["speaker_anchor"], 240, 240)
-        attachment = tuple(round((first + second) / 2) for first, second in zip(base_one, base_two))
+        geometry = _organic_tail_geometry(
+            rect, item["speaker_anchor"], 240, 240, item["voice_source"]
+        )
+        attachment = tuple(geometry["attachment"])
 
         render_text_item(
             draw, item, rect, ImageFont.truetype(str(FONT), 24), self.characters
         )
 
-        self.assertEqual((255, 255, 255), image.getpixel(attachment))
+        root_pixel = image.getpixel(attachment)
+        self.assertGreaterEqual(min(root_pixel), 245)
+        root_x, root_y = (round(value) for value in attachment)
+        root_patch = [
+            image.getpixel((x, y))
+            for x in range(max(0, root_x - 1), min(image.width, root_x + 2))
+            for y in range(max(0, root_y - 1), min(image.height, root_y + 2))
+        ]
+        self.assertGreaterEqual(sum(min(pixel) >= 220 for pixel in root_patch), 6)
 
     def test_dialogue_uses_uppercase_comic_lettering_without_mutating_authored_text(self):
         item = dialogue("Wait, did you call me Peter?")
@@ -429,43 +439,51 @@ class LetteringTests(unittest.TestCase):
             "".join(text for text, _ in captured_runs).replace(" ", ""),
         )
 
-    def test_dialogue_tail_is_a_short_pointer_not_a_cross_panel_leash(self):
-        from letter_panels import _ellipse_tail_polygon
+    def test_organic_tail_geometry_is_semantic_tapered_and_deterministic(self):
+        from letter_panels import _organic_tail_geometry
 
         rect = {"x": 40, "y": 30, "width": 240, "height": 160}
-        base_one, base_two, tip = _ellipse_tail_polygon(rect, [1.0, 1.0], 800, 1000)
-        attachment = (
-            (base_one[0] + base_two[0]) / 2,
-            (base_one[1] + base_two[1]) / 2,
+        first = _organic_tail_geometry(rect, [0.36, 0.24], 800, 1000, "human")
+        second = _organic_tail_geometry(rect, [0.36, 0.24], 800, 1000, "human")
+        self.assertEqual(first, second)
+        self.assertEqual(
+            {
+                "policy_version", "voice_source", "speaker_anchor", "attachment",
+                "base", "control", "tip", "source_gap", "length", "width",
+            },
+            set(first),
         )
-        tail_length = math.hypot(tip[0] - attachment[0], tip[1] - attachment[1])
-        tail_base = math.hypot(
-            base_two[0] - base_one[0],
-            base_two[1] - base_one[1],
+        self.assertEqual("organic-cubic-v1", first["policy_version"])
+        self.assertEqual("human", first["voice_source"])
+        self.assertEqual([0.36, 0.24], first["speaker_anchor"])
+        self.assertGreaterEqual(first["length"], 12)
+        self.assertLessEqual(first["length"], min(800, 1000) * 0.12 + 1)
+        self.assertLess(first["width"] / first["length"], 0.5)
+        self.assertGreater(first["source_gap"], 0)
+        anchor = (round(0.36 * 800), round(0.24 * 1000))
+        self.assertAlmostEqual(
+            first["source_gap"],
+            math.dist(first["tip"], anchor),
+            delta=1.5,
         )
+        for point in (
+            first["attachment"], first["tip"], *first["base"],
+            *first["control"][0], *first["control"][1],
+        ):
+            self.assertTrue(all(math.isfinite(value) for value in point))
+            self.assertGreaterEqual(point[0], 0)
+            self.assertLess(point[0], 800)
+            self.assertGreaterEqual(point[1], 0)
+            self.assertLess(point[1], 1000)
 
-        # Reference-style tails stay near the balloon instead of crossing the
-        # central face/action zone.
-        self.assertGreaterEqual(tail_length, 12)
-        self.assertLessEqual(tail_length, rect["height"] * 0.35 + 1)
-        self.assertLessEqual(tail_length, min(800, 1000) * 0.055 + 1)
-        self.assertGreaterEqual(tail_base / tail_length, 0.65)
-
-    def test_tail_target_inside_balloon_still_produces_visible_outward_pointer(self):
-        from letter_panels import _ellipse_tail_polygon
+    def test_organic_tail_rejects_anchor_inside_balloon_and_unknown_source(self):
+        from letter_panels import _organic_tail_geometry
 
         rect = {"x": 100, "y": 100, "width": 240, "height": 160}
-        base_one, base_two, tip = _ellipse_tail_polygon(rect, [0.28, 0.22], 800, 1000)
-        attachment = (
-            (base_one[0] + base_two[0]) / 2,
-            (base_one[1] + base_two[1]) / 2,
-        )
-        center = (rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2)
-        outward = (attachment[0] - center[0], attachment[1] - center[1])
-        pointer = (tip[0] - attachment[0], tip[1] - attachment[1])
-
-        self.assertGreater(outward[0] * pointer[0] + outward[1] * pointer[1], 0)
-        self.assertGreaterEqual(math.hypot(*pointer), 12)
+        with self.assertRaisesRegex(ValueError, "outside the balloon"):
+            _organic_tail_geometry(rect, [0.28, 0.18], 800, 1000, "human")
+        with self.assertRaisesRegex(ValueError, "voice source"):
+            _organic_tail_geometry(rect, [0.6, 0.6], 800, 1000, "system")
 
     def test_single_line_dialogue_balloon_is_compact_but_contains_text(self):
         from letter_panels import _balloon_box, _layout_styled_text
@@ -487,10 +505,10 @@ class LetteringTests(unittest.TestCase):
 
     def test_dialogue_uses_adaptive_oval_and_boundary_tail_geometry(self):
         from letter_panels import (
-            _ellipse_tail_polygon,
             _fitted_item_rect,
             _item_font,
             _layout_styled_text,
+            _organic_tail_geometry,
         )
 
         image = Image.new("RGB", (800, 1000), (28, 32, 40))
@@ -514,17 +532,15 @@ class LetteringTests(unittest.TestCase):
         self.assertGreaterEqual(short_rect["x"], maximum["x"])
         self.assertGreaterEqual(short_rect["y"], maximum["y"])
 
-        base_one, base_two, target = _ellipse_tail_polygon(
-            short_rect, [-0.25, 1.25], 800, 1000
+        geometry = _organic_tail_geometry(
+            short_rect, [0.40, 0.28], 800, 1000, "human"
         )
+        attachment = tuple(geometry["attachment"])
+        target = tuple(geometry["tip"])
         self.assertLess(target[0], 800)
         self.assertLess(target[1], 1000)
         self.assertGreaterEqual(target[0], 0)
         self.assertGreaterEqual(target[1], 0)
-        attachment = (
-            (base_one[0] + base_two[0]) / 2,
-            (base_one[1] + base_two[1]) / 2,
-        )
         center = (
             short_rect["x"] + short_rect["width"] / 2,
             short_rect["y"] + short_rect["height"] / 2,
@@ -540,7 +556,7 @@ class LetteringTests(unittest.TestCase):
         expected_attachment = (center[0] + delta_x * scale, center[1] + delta_y * scale)
         self.assertAlmostEqual(expected_attachment[0], attachment[0], delta=1.0)
         self.assertAlmostEqual(expected_attachment[1], attachment[1], delta=1.0)
-        self.assertNotIn(center, (base_one, base_two, target))
+        self.assertNotIn(center, (*map(tuple, geometry["base"]), target))
 
         with mock.patch(
             "letter_panels._draw_antialiased_balloon",
@@ -628,7 +644,7 @@ class LetteringTests(unittest.TestCase):
         self.assertAlmostEqual(400, (box[0] + box[2]) / 2, delta=2)
 
     def test_non_finite_speaker_anchor_is_rejected_as_value_error(self):
-        from letter_panels import _ellipse_tail_polygon
+        from letter_panels import _organic_tail_geometry
 
         before = self.panel.read_bytes()
         for value in (float("inf"), float("-inf"), float("nan")):
@@ -638,8 +654,12 @@ class LetteringTests(unittest.TestCase):
                 letter_panel(str(self.panel), 800, 1000, [item], self.characters)
             self.assertEqual(before, self.panel.read_bytes())
             with self.assertRaisesRegex(ValueError, "finite"):
-                _ellipse_tail_polygon(
-                    {"x": 40, "y": 30, "width": 120, "height": 70}, [value, 0.5], 240, 240
+                _organic_tail_geometry(
+                    {"x": 40, "y": 30, "width": 120, "height": 70},
+                    [value, 0.5],
+                    240,
+                    240,
+                    "human",
                 )
 
     def test_oversized_panel_image_is_rejected_as_value_error(self):
@@ -779,12 +799,13 @@ class LetteringTests(unittest.TestCase):
         image = Image.new("RGB", (512, 512), "black")
         draw = ImageDraw.Draw(image)
         font = ImageFont.truetype(str(FONT), 24)
-        rect = {"x": 4, "y": 4, "width": 504, "height": 504}
+        rect = {"x": 96, "y": 96, "width": 250, "height": 180}
         for anchor in (
             "top-left", "top-center", "top-right", "middle-left",
             "middle-right", "bottom-left", "bottom-center", "bottom-right",
         ):
             item = dialogue(anchor=anchor)
+            item["speaker_anchor"] = [0.9, 0.85]
             render_text_item(draw, item, rect, font, self.characters)
         self.assertEqual((512, 512), image.size)
 

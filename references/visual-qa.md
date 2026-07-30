@@ -50,5 +50,10 @@ override an unreadable/corrupt image, safety refusal, or non-visual failure.
 
 After composition, inspect numeric order, page continuity, borders/gutters, clipped or
 overlapping text, bubble/caption readability, tail direction, covered faces/actions, and
-consistent reading flow. Any error-level panel or page keeps export blocked. Deterministic
-hash/dimension/PDF checks complement visual inspection; they do not replace it.
+consistent reading flow. For `bubble-tail-direction`, record exactly one bounded region per
+dialogue with its `panel_id`, `text_id`, speaker, voice source, speaker anchor, resolved tip,
+and result; generic `all-bubbles` evidence is rejected. Verify the tail points to the declared
+voice source, stops before it, and has a continuous join, durable white core, consistent
+outline, and clean tip. Any error-level panel or page keeps export blocked. Deterministic
+hash/dimension/PDF checks bind evidence to current artifacts; they do not replace visual
+inspection.

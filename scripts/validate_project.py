@@ -1138,22 +1138,61 @@ def validate_lettering_provenance(
                 stale("items.box", "item box is missing or non-positive")
             tail = entry.get("tail")
             if tail is not None:
-                valid_tail = isinstance(tail, dict)
-                for key in ("origin", "target"):
-                    point = tail.get(key) if isinstance(tail, dict) else None
-                    valid_tail = (
-                        valid_tail
-                        and isinstance(point, list)
-                        and len(point) == 2
+                expected_tail_fields = {
+                    "attachment", "base", "control", "length", "policy_version",
+                    "source_gap", "speaker_anchor", "tip", "voice_source", "width",
+                }
+
+                def finite_point(value: object) -> bool:
+                    return (
+                        isinstance(value, list)
+                        and len(value) == 2
                         and all(
-                            isinstance(value, (int, float))
-                            and not isinstance(value, bool)
-                            and math.isfinite(value)
-                            for value in (point or [])
+                            isinstance(coordinate, (int, float))
+                            and not isinstance(coordinate, bool)
+                            and math.isfinite(coordinate)
+                            for coordinate in value
                         )
                     )
+
+                valid_tail = (
+                    isinstance(tail, dict)
+                    and set(tail) == expected_tail_fields
+                    and tail.get("policy_version") == "organic-cubic-v1"
+                    and tail.get("voice_source") in {"human", "device"}
+                    and finite_point(tail.get("speaker_anchor"))
+                    and all(0 <= coordinate <= 1 for coordinate in tail.get("speaker_anchor", []))
+                    and finite_point(tail.get("attachment"))
+                    and finite_point(tail.get("tip"))
+                )
+                base = tail.get("base") if isinstance(tail, dict) else None
+                control = tail.get("control") if isinstance(tail, dict) else None
+                valid_tail = (
+                    valid_tail
+                    and isinstance(base, list)
+                    and len(base) == 2
+                    and all(finite_point(point) for point in base)
+                    and isinstance(control, list)
+                    and len(control) == 2
+                    and all(
+                        isinstance(side, list)
+                        and len(side) == 2
+                        and all(finite_point(point) for point in side)
+                        for side in control
+                    )
+                    and all(
+                        isinstance(tail.get(field), (int, float))
+                        and not isinstance(tail.get(field), bool)
+                        and math.isfinite(tail[field])
+                        and tail[field] > 0
+                        for field in ("length", "source_gap", "width")
+                    )
+                )
                 if not valid_tail:
-                    stale("items.tail", "tail coordinates must be finite points")
+                    stale(
+                        "items.tail",
+                        "tail must be a finite organic-cubic-v1 semantic geometry record",
+                    )
         if len(orders) != len(set(orders)):
             stale("items.reading_order", "reading order values must be unique")
 

@@ -65,6 +65,34 @@ QUALITY_SCENARIOS = {
 }
 
 
+def bounded_tail_regions(project: Path, page_number: int) -> list[dict[str, object]]:
+    """Build exact test-only tail regions from current storyboard and geometry."""
+    storyboard = json.loads((Path(project) / "plan/storyboard.json").read_text("utf-8"))
+    page = next(
+        page for page in storyboard["pages"] if page.get("number") == page_number
+    )
+    regions: list[dict[str, object]] = []
+    for panel in page["panels"]:
+        geometry = json.loads(
+            (Path(project) / f"panels/{panel['id']}/lettering.json").read_text("utf-8")
+        )
+        placed = {item["id"]: item for item in geometry["items"]}
+        for item in panel["text"]:
+            if item.get("kind") != "dialogue":
+                continue
+            tail = placed[item["id"]]["tail"]
+            regions.append({
+                "panel_id": panel["id"],
+                "text_id": item["id"],
+                "speaker": item["speaker"],
+                "voice_source": item["voice_source"],
+                "speaker_anchor": item["speaker_anchor"],
+                "tip": tail["tip"],
+                "result": "pass",
+            })
+    return regions
+
+
 def _fixture_image(size: tuple[int, int], color: tuple[int, int, int]) -> Image.Image:
     image = Image.new("RGB", size, color)
     draw = ImageDraw.Draw(image)

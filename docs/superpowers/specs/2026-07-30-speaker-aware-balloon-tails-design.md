@@ -2,9 +2,9 @@
 
 **Date:** 2026-07-30
 
-**Status:** Approved design, implementation pending
+**Status:** Implemented and visually verified
 
-**Target:** Comic Sol prerelease after `v2.0.0rc3`
+**Target:** Comic Sol `v2.0.0rc4` prerelease
 
 ## Problem
 
@@ -99,10 +99,10 @@ The engine does not claim that an authored human anchor is anatomically correct 
 
 The renderer replaces the triangular polygon with a closed cubic path represented by two tapered sides:
 
-- **Attachment:** the nearest point on the fitted ellipse along the ray toward `speaker_anchor`.
-- **Base pair:** two nearby points sampled along the ellipse tangent, narrow enough to merge naturally into the body.
+- **Attachment:** the nearest point on the fitted ellipse along the ray toward `speaker_anchor`; this remains the semantic ray origin in provenance.
+- **Base pair:** two points begin slightly inside the balloon body on opposite sides of the ray, so the merged mask—not a forced outline endpoint—forms the visible body-tail junction without a notch or doubled edge.
 - **Tip:** a point on the attachment-to-anchor ray that stops before the anchor by a protected source gap.
-- **Control points:** bend each side gradually from the ellipse tangent toward the tip; both sides converge without crossing.
+- **Control points:** preserve each side of the ray, retain a durable white core, and converge without crossing or producing a needle-like section.
 
 Deterministic constraints:
 
@@ -143,13 +143,13 @@ The existing schema-2.0 `bubble-tail-direction` check retains its bounded eviden
 shape; its `regions` array contains exactly one structured entry per rendered dialogue
 item. Each entry records:
 
-- text item ID;
-- declared speaker and voice source;
-- observed balloon location;
-- observed tail endpoint region;
-- whether the endpoint clearly indicates the declared source;
-- whether the tail avoids faces, text, and focal action;
-- whether body-tail joining and outline thickness look continuous.
+- `panel_id` and `text_id`;
+- declared `speaker` and `voice_source`;
+- current normalized `speaker_anchor`;
+- current resolved pixel `tip` from lettering geometry;
+- reviewer `result`, which must agree with the enclosing check result.
+
+The reviewer evidence text remains responsible for confirming that the endpoint clearly indicates the declared source, avoids faces/text/focal action, and has a continuous body-tail join and outline. Deterministic fields bind that visual judgment to the current rendered dialogue; they do not infer a visual pass.
 
 A page cannot be marked reviewed when any dialogue tail:
 

@@ -12,7 +12,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from tests.support import make_symlink  # noqa: E402
+from tests.support import bounded_tail_regions, make_symlink  # noqa: E402
 from page_quality import build_page_quality_record, write_page_quality_record  # noqa: E402
 
 MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
@@ -45,7 +45,7 @@ TOOL_NAMES = {
 }
 
 
-def valid_page_reviewer_checks():
+def valid_page_reviewer_checks(project: Path, page_number: int):
     return [
         {
             "id": "face-action-obstruction",
@@ -63,7 +63,7 @@ def valid_page_reviewer_checks():
             "evidence": "Reviewer inspected every bubble tail against its intended speaker.",
             "method": "bounded-visual-review",
             "reviewer": "fixture-reviewer",
-            "regions": [{"scope": "all-bubbles"}],
+            "regions": bounded_tail_regions(project, page_number),
         },
         {
             "id": "accidental-text-watermark",
@@ -83,7 +83,7 @@ def write_current_page_qa_records(project: Path, page_numbers):
             project,
             page_number,
             build_page_quality_record(
-                project, page_number, valid_page_reviewer_checks()
+                project, page_number, valid_page_reviewer_checks(project, page_number)
             ),
         )
 

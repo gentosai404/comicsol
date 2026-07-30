@@ -39,8 +39,7 @@
               "id": "p01-01-t01",
               "kind": "caption",
               "priority": 1,
-              "speaker": null,
-              "tail_target": null
+              "speaker": null
             }
           ]
         },
@@ -80,10 +79,11 @@
               "kind": "dialogue",
               "priority": 1,
               "speaker": "mira",
-              "tail_target": [
+              "speaker_anchor": [
                 0.3,
                 0.2
-              ]
+              ],
+              "voice_source": "human"
             }
           ]
         }
@@ -128,8 +128,7 @@
               "id": "p02-01-t01",
               "kind": "caption",
               "priority": 1,
-              "speaker": null,
-              "tail_target": null
+              "speaker": null
             }
           ]
         },
@@ -168,8 +167,7 @@
               "id": "p02-02-t01",
               "kind": "caption",
               "priority": 1,
-              "speaker": null,
-              "tail_target": null
+              "speaker": null
             }
           ]
         }
