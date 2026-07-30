@@ -961,6 +961,22 @@ class PackagingTests(unittest.TestCase):
         for name in ("CONTRIBUTING.md", "SECURITY.md"):
             self.assertTrue((ROOT / name).is_file(), name)
 
+    def test_readme_badges_report_live_project_contracts(self):
+        readme = self.readme()
+        for badge in (
+            "actions/workflows/tests.yml/badge.svg?branch=main",
+            "img.shields.io/github/v/release/wenn-id/comicsol?include_prereleases&label=release",
+            "img.shields.io/github/license/wenn-id/comicsol",
+            "img.shields.io/badge/Python-3.11-3776AB",
+            "img.shields.io/badge/MCP_tools-17-brightgreen",
+            "img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue",
+        ):
+            self.assertIn(badge, readme)
+        self.assertLess(
+            readme.index("actions/workflows/tests.yml/badge.svg"),
+            readme.index("Comic Sol is an installable"),
+        )
+
     def test_package_files_install_and_artifact_contract_are_documented(self):
         for name in ("LICENSE", "README.md", "SKILL.md"):
             self.assertTrue((ROOT / name).is_file(), name)
