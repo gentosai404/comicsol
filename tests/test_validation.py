@@ -961,6 +961,37 @@ class PackagingTests(unittest.TestCase):
         for name in ("CONTRIBUTING.md", "SECURITY.md"):
             self.assertTrue((ROOT / name).is_file(), name)
 
+    def test_readme_badges_report_live_project_contracts(self):
+        readme = self.readme()
+        preamble, separator, _ = readme.partition("Comic Sol is an installable")
+        self.assertTrue(separator, "README product introduction is missing")
+        badges = set(re.findall(r"\[!\[([^]]+)\]\(([^)]+)\)\]\(([^)]+)\)", preamble))
+        expected = {
+            (
+                "Tests",
+                "https://github.com/wenn-id/comicsol/actions/workflows/tests.yml/badge.svg?branch=main",
+                "https://github.com/wenn-id/comicsol/actions/workflows/tests.yml",
+            ),
+            (
+                "Release",
+                "https://img.shields.io/github/v/release/wenn-id/comicsol?include_prereleases&label=release",
+                "https://github.com/wenn-id/comicsol/releases",
+            ),
+            ("License", "https://img.shields.io/github/license/wenn-id/comicsol", "LICENSE"),
+            (
+                "Python",
+                "https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white",
+                "https://www.python.org/",
+            ),
+            ("MCP tools", "https://img.shields.io/badge/MCP_tools-17-brightgreen", "#mcp-server-optional"),
+            (
+                "Platforms",
+                "https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue",
+                "docs/install.md",
+            ),
+        }
+        self.assertEqual(expected, badges)
+
     def test_package_files_install_and_artifact_contract_are_documented(self):
         for name in ("LICENSE", "README.md", "SKILL.md"):
             self.assertTrue((ROOT / name).is_file(), name)
