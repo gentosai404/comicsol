@@ -992,6 +992,17 @@ class PackagingTests(unittest.TestCase):
         }
         self.assertEqual(expected, badges)
 
+    def test_install_docs_recommend_superpowers_without_making_it_a_dependency(self):
+        readme = self.readme()
+        install = (ROOT / "docs/install.md").read_text("utf-8")
+        for document in (readme, install):
+            self.assertIn("Recommended companion: Superpowers", document)
+            self.assertIn("https://github.com/obra/superpowers", document)
+            self.assertIn("Superpowers is optional", document)
+            self.assertIn("installed separately", document)
+        self.assertIn("not required for Comic Sol to run", " ".join(readme.split()))
+        self.assertIn("not bundled with or required by Comic Sol", " ".join(install.split()))
+
     def test_package_files_install_and_artifact_contract_are_documented(self):
         for name in ("LICENSE", "README.md", "SKILL.md"):
             self.assertTrue((ROOT / name).is_file(), name)
