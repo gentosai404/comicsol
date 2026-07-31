@@ -2,6 +2,13 @@
 
 Comic Sol `v2.0.0rc4` is a prerelease distributed as native portable archives for Linux, macOS, and Windows, plus a Python wheel/source archive and an OCI image definition. Native archives bundle Python 3.11, Pillow, MCP, fonts, templates, the Skill, and references; no system Python is required after extraction.
 
+## Recommended companion: Superpowers
+
+For structured brainstorming, planning, debugging, and verification workflows,
+we recommend installing [Superpowers](https://github.com/obra/superpowers)
+alongside Comic Sol. Superpowers is optional, installed separately, and is not
+bundled with or required by Comic Sol.
+
 ## Security status
 
 This release is **unsigned**. It is not Authenticode-signed, notarized, or GPG-signed. Every release includes `SHA256SUMS`, per-platform metadata with `signature_status: unsigned`, and a CycloneDX SBOM. Download the archive and checksum manifest over HTTPS, verify the digest, then run the installer. Never pipe a remote installer directly into a shell.

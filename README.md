@@ -57,6 +57,13 @@ python3.11 -m pip install .
 comic-sol --json doctor
 ```
 
+### Recommended companion: Superpowers
+
+For structured brainstorming, planning, debugging, and verification workflows,
+we recommend installing [Superpowers](https://github.com/obra/superpowers)
+alongside Comic Sol. Superpowers is optional, installed separately, and is not
+required for Comic Sol to run.
+
 The CLI currently exposes `doctor`, `init`, `status`, `validate`, `resume`,
 `finalize`, and the optional `mcp` launcher. Machine-readable responses use one
 stable envelope containing `ok`, `command`, `data`, and `error`.
