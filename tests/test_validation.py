@@ -1003,6 +1003,21 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("not required for Comic Sol to run", " ".join(readme.split()))
         self.assertIn("not bundled with or required by Comic Sol", " ".join(install.split()))
 
+        dependency_and_packaging_inputs = (
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-mcp.txt",
+            "setup.py",
+            "packaging/comic-sol.spec",
+            "scripts/build_portable.py",
+            "Dockerfile",
+            ".github/workflows/release.yml",
+        )
+        for relative_path in dependency_and_packaging_inputs:
+            content = (ROOT / relative_path).read_text("utf-8").lower()
+            self.assertNotIn("superpowers", content, relative_path)
+            self.assertNotIn("github.com/obra/superpowers", content, relative_path)
+
     def test_package_files_install_and_artifact_contract_are_documented(self):
         for name in ("LICENSE", "README.md", "SKILL.md"):
             self.assertTrue((ROOT / name).is_file(), name)
