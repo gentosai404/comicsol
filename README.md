@@ -67,8 +67,9 @@ alongside Comic Sol. Superpowers is optional, installed separately, and is not
 required for Comic Sol to run.
 
 The CLI currently exposes `doctor`, `init`, `status`, `validate`, `resume`,
-`finalize`, and the optional `mcp` launcher. Machine-readable responses use one
-stable envelope containing `ok`, `command`, `data`, and `error`.
+`finalize`, `setup`, `repair`, and `uninstall`, plus the optional `mcp` launcher.
+Machine-readable responses use one stable envelope containing `ok`, `command`,
+`data`, and `error`.
 
 ## Native Distribution (`v2.0.0rc4`)
 
