@@ -825,6 +825,35 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(f"references/{name}.md", text)
             self.assertTrue((ROOT / "references" / f"{name}.md").is_file())
 
+    def test_fast_mode_rules_present_in_skill(self):
+        """Fast Mode contract: black-box engine, no scaffolding, per-panel QA,
+        split resolution checks, two-call finalize, and scoped batch precedence."""
+        text = self.skill_text()
+        self.assertIn("## Fast Mode", text)
+        for rule in (
+            "Never read engine source",
+            "Use init, never hand-write setup scripts",
+            "Right-size reasoning per stage",
+            "Parallel independent panels",
+            "One resolution check per artifact",
+            "Two-call finalization",
+            "Lock the brief",
+        ):
+            self.assertIn(rule, text)
+        for phrase in (
+            "Do not read, grep, or open any file under `scripts/`, `comic_sol_product/`, or",
+            "Do not write `setup_batch_*.py`, `build_plans.py`, or equivalent helpers.",
+            "Visual QA still inspects every accepted attempt before",
+            "Check panel/source at original resolution during panel QA.",
+            "Apply the 390px readability check once,",
+            "run `finalize` once to letter and compose",
+            "then run `finalize` once more.",
+            "The batch map takes precedence only over contradictory internal checklist counts;",
+            "safety/IP rules, engine validation, visual QA, and final-acceptance gates remain",
+            "authoritative.",
+        ):
+            self.assertIn(phrase, text)
+
     def test_scripts_and_capability_reference_are_provider_neutral(self):
         forbidden = re.compile(
             r"OPENAI_API_KEY|ANTHROPIC_API_KEY|api[_ -]?key\s*=|requests\.|httpx\.|urllib\.request",
