@@ -29,7 +29,7 @@
 Run:
 
 ```bash
-/tmp/comic-sol-base-docs/bin/python -m comic_sol_product.cli --help
+python3.11 -m comic_sol_product.cli --help
 ```
 
 Expected: the positional command list contains `doctor`, `init`, `status`,
@@ -51,9 +51,9 @@ Machine-readable responses use one stable envelope containing `ok`, `command`,
 Run:
 
 ```bash
-/tmp/comic-sol-base-docs/bin/python -m comic_sol_product.cli --help
-/tmp/comic-sol-base-docs/bin/python -m unittest tests.test_release_docs -v
-/tmp/comic-sol-base-docs/bin/python -m unittest discover -s tests -v
+python3.11 -m comic_sol_product.cli --help
+python3.11 -m unittest tests.test_release_docs -v
+python3.11 -m unittest discover -s tests -v
 git diff --check
 ```
 
