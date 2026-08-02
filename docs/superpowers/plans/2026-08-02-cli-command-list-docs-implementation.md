@@ -2,16 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Keep the README's CLI command summary synchronized with all ten commands exposed by the packaged entry point.
+**Goal:** Correct the README's CLI command summary so it names all ten commands exposed by the packaged entry point.
 
-**Architecture:** Add one focused documentation contract test that isolates the README command-summary sentence and checks each public command as inline code. Make the smallest documentation correction needed to satisfy that contract; runtime code and CLI parsing remain unchanged.
+**Architecture:** Treat the packaged CLI's `--help` output as the source of truth and make the smallest matching prose correction in the README. Human-facing prose does not receive a brittle source-text assertion; runtime code and CLI parsing remain unchanged.
 
 **Tech Stack:** Python 3.11, standard-library `unittest`, Markdown.
 
 ## Global Constraints
 
 - Update the README command summary to include `setup`, `repair`, and `uninstall`.
-- Add a focused documentation regression test that requires the README summary to name every public CLI command currently exposed by the packaged entry point.
 - Do not change command behavior, parser structure, installation instructions, or the documented 17-tool MCP contract.
 
 ---
@@ -19,41 +18,24 @@
 ### Task 1: Synchronize the README CLI command summary
 
 **Files:**
-- Modify: `tests/test_release_docs.py:14-20`
 - Modify: `README.md:69-71`
 
 **Interfaces:**
-- Consumes: `ReleaseDocumentationTests.readme`, the existing UTF-8 README fixture loaded by `setUpClass`.
-- Produces: A documentation contract asserting that the isolated CLI summary contains the ten public command names; no runtime interface changes.
+- Consumes: The ten-command list emitted by `python3.11 -m comic_sol_product.cli --help`.
+- Produces: A corrected human-facing README summary; no runtime interface changes.
 
-- [ ] **Step 1: Write the failing documentation contract test**
-
-Add this test after `test_readme_links_native_install_and_release_security`:
-
-```python
-    def test_readme_lists_every_public_cli_command(self):
-        command_summary = self.readme.split("The CLI currently exposes ", 1)[1].split(
-            " Machine-readable responses", 1
-        )[0]
-        for command in (
-            "doctor", "init", "status", "validate", "resume", "finalize",
-            "mcp", "setup", "repair", "uninstall",
-        ):
-            with self.subTest(command=command):
-                self.assertIn(f"`{command}`", command_summary)
-```
-
-- [ ] **Step 2: Run the new test and verify RED**
+- [ ] **Step 1: Confirm the packaged CLI command list**
 
 Run:
 
 ```bash
-python3.11 -m unittest tests.test_release_docs.ReleaseDocumentationTests.test_readme_lists_every_public_cli_command -v
+/tmp/comic-sol-base-docs/bin/python -m comic_sol_product.cli --help
 ```
 
-Expected: FAIL subtests for `setup`, `repair`, and `uninstall`, proving the test detects the incomplete summary.
+Expected: the positional command list contains `doctor`, `init`, `status`,
+`validate`, `resume`, `finalize`, `mcp`, `setup`, `repair`, and `uninstall`.
 
-- [ ] **Step 3: Make the minimal README correction**
+- [ ] **Step 2: Make the minimal README correction**
 
 Replace the current command-summary paragraph with:
 
@@ -64,23 +46,25 @@ Machine-readable responses use one stable envelope containing `ok`, `command`,
 `data`, and `error`.
 ```
 
-- [ ] **Step 4: Run focused and full verification**
+- [ ] **Step 3: Run focused and full verification**
 
 Run:
 
 ```bash
-python3.11 -m unittest tests.test_release_docs -v
-python3.11 -m unittest discover -s tests -v
+/tmp/comic-sol-base-docs/bin/python -m comic_sol_product.cli --help
+/tmp/comic-sol-base-docs/bin/python -m unittest tests.test_release_docs -v
+/tmp/comic-sol-base-docs/bin/python -m unittest discover -s tests -v
 git diff --check
 ```
 
-Expected: both test commands report `OK`, and `git diff --check` produces no output.
+Expected: `--help` still lists all ten commands, both test commands report `OK`,
+and `git diff --check` produces no output.
 
-- [ ] **Step 5: Review and commit the implementation**
+- [ ] **Step 4: Review and commit the implementation**
 
-Inspect `git status -sb` and `git diff`, confirm only the intended README and test changes are present, then run:
+Inspect `git status -sb` and `git diff`, confirm only the intended README change is present, then run:
 
 ```bash
-git add README.md tests/test_release_docs.py
+git add README.md
 git commit -m "docs: list all CLI commands in README"
 ```
