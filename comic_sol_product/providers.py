@@ -44,7 +44,7 @@ def _safe_message(message: str) -> str:
             return f"{quote}<path>{quote}"
         return match.group(0)
 
-    sanitized = re.sub(r"(['\"])([^'\"]+)\1", replace_quoted_path, sanitized)
+    sanitized = re.sub(r"(['\"])([^\r\n]+?)\1", replace_quoted_path, sanitized)
     # Provider messages may contain local paths. Preserve useful prose but never the
     # private path token itself.
     tokens = sanitized.split()
