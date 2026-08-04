@@ -110,6 +110,18 @@ class ProviderContractTests(unittest.TestCase):
                     {"category": "transient", "message": failure.message}, failure.to_record()
                 )
 
+    def test_failure_sanitizes_quoted_paths_with_spaces_as_one_unit(self):
+        for raw_path in (
+            "/tmp/Comic Sol/private payload.json",
+            r"C:\Comic Sol\private payload.json",
+        ):
+            with self.subTest(raw_path=raw_path):
+                failure = GenerationFailure(
+                    "transient", f"provider failed at '{raw_path}'"
+                )
+                self.assertEqual("provider failed at '<path>'", failure.message)
+                self.assertNotIn(raw_path, failure.message)
+
     def test_fake_provider_result_is_retained_through_engine_accounting(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             project = Path(temporary_directory) / "project"
