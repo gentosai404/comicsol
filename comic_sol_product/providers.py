@@ -37,6 +37,14 @@ def _optional_text(name: str, value: str | None) -> None:
 
 def _safe_message(message: str) -> str:
     sanitized = str(message).strip() or "provider operation failed"
+
+    def replace_quoted_path(match: re.Match[str]) -> str:
+        quote, candidate = match.group(1), match.group(2)
+        if PurePosixPath(candidate).is_absolute() or PureWindowsPath(candidate).is_absolute():
+            return f"{quote}<path>{quote}"
+        return match.group(0)
+
+    sanitized = re.sub(r"(['\"])([^\r\n]+?)\1", replace_quoted_path, sanitized)
     # Provider messages may contain local paths. Preserve useful prose but never the
     # private path token itself.
     tokens = sanitized.split()
