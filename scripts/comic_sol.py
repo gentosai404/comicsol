@@ -11,12 +11,16 @@ import re
 import sys
 import tempfile
 import unicodedata
+import warnings
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from PIL import Image, ImageFont
+
+# Fail closed on crafted raster decompression bombs before any project image is opened.
+Image.MAX_IMAGE_PIXELS = 1600 * 2400 * 16
 
 from project_io import (
     ProjectLock,
@@ -120,6 +124,8 @@ SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|authorization|credential|password|private[_-]?key|secret|token)",
     re.IGNORECASE,
 )
+REQUEST_SETTING_ALLOWLIST = frozenset({"mode", "language", "title"})
+REQUEST_MODES = frozenset({"short_prompt", "pasted_story", "source_file", "resume"})
 REQUIRED_PILLOW = "12.3.0"
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 CATEGORY = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,63}$")
@@ -306,6 +312,38 @@ def _allocate_project_directory(output_root: Path, base_slug: str) -> Path:
         return candidate
 
 
+def validate_request_settings(request: dict[str, object]) -> dict[str, object]:
+    """Validate the small, non-secret request record persisted in each project."""
+    if not isinstance(request, dict):
+        raise TypeError("request must be a JSON object")
+    def reject_sensitive_keys(value: object) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if SENSITIVE_KEY.search(str(key)):
+                    raise ValueError(f"sensitive request setting is not allowed: {key}")
+                reject_sensitive_keys(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                reject_sensitive_keys(nested)
+
+    reject_sensitive_keys(request)
+    if any(not isinstance(key, str) for key in request):
+        raise ValueError("request setting keys must be strings")
+    unknown = sorted(set(request) - REQUEST_SETTING_ALLOWLIST)
+    if unknown:
+        raise ValueError(f"unsupported request setting: {unknown[0]}")
+    mode = request.get("mode", "short_prompt")
+    language = request.get("language", "en")
+    title = request.get("title")
+    if not isinstance(mode, str) or mode not in REQUEST_MODES:
+        raise ValueError("request mode must be one of short_prompt, pasted_story, source_file, or resume")
+    if not isinstance(language, str) or not language.strip() or len(language) > 35:
+        raise ValueError("request language must be a non-empty language tag")
+    if title is not None and (not isinstance(title, str) or not title.strip() or len(title) > 200):
+        raise ValueError("request title must be a non-empty string of at most 200 characters")
+    return {key: request[key] for key in sorted(request)}
+
+
 def _manifest_from_template(
     project_id: str,
     title: str,
@@ -342,14 +380,15 @@ def init_project(
     if not title.strip():
         raise ValueError("title must not be empty")
     validate_source_bytes(source)
+    validated_request = validate_request_settings(request)
 
     project_dir = _allocate_project_directory(Path(output_root), slugify(title))
     for relative in PROJECT_DIRECTORIES:
         (project_dir / relative).mkdir(parents=True, exist_ok=False)
 
     atomic_write_bytes(project_dir / "source/input.txt", source)
-    atomic_write_json(project_dir / "source/request.json", request)
-    manifest = _manifest_from_template(project_dir.name, title.strip(), source, request)
+    atomic_write_json(project_dir / "source/request.json", validated_request)
+    manifest = _manifest_from_template(project_dir.name, title.strip(), source, validated_request)
     atomic_write_json(project_dir / "project.json", manifest)
     append_event(
         project_dir,
@@ -1410,14 +1449,16 @@ def record_generation_attempt(
 
 def _verify_raster(path: Path) -> tuple[int, int]:
     try:
-        with Image.open(path) as image:
-            if image.format not in {"PNG", "JPEG", "WEBP"}:
-                raise ValueError("attempt must be a readable raster")
-            image.load()
-            if image.width < 512 or image.height < 512:
-                raise ValueError("attempt must be a readable raster at least 512px")
-            return image.width, image.height
-    except (OSError, SyntaxError, Image.DecompressionBombError) as error:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                if image.format not in {"PNG", "JPEG", "WEBP"}:
+                    raise ValueError("attempt must be a readable raster")
+                image.load()
+                if image.width < 512 or image.height < 512:
+                    raise ValueError("attempt must be a readable raster at least 512px")
+                return image.width, image.height
+    except (OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
         raise ValueError("attempt must be a readable raster") from error
 
 

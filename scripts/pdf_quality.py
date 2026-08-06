@@ -5,10 +5,17 @@ from __future__ import annotations
 
 import io
 import re
+import warnings
 from dataclasses import asdict, dataclass
 from typing import Sequence
 
 from PIL import Image, ImageChops
+
+# One global raster decode budget keeps every Image.open path fail-closed against
+# crafted decompression bombs, while project-specific decoded-size checks remain
+# in place for lettering and normalization. Pages are 1600x2400; sixteen page
+# areas is the generous ceiling for oversampled source art.
+Image.MAX_IMAGE_PIXELS = 1600 * 2400 * 16
 
 PDF_TOLERANCE_VERSION = "1"
 PDF_EXPORTER_VERSION = "comic-sol-pillow-raster-v1"
@@ -135,12 +142,14 @@ def _decode_pdf_frames(payload: bytes) -> list[Image.Image]:
         if not stream.startswith(b"\xff\xd8"):
             continue
         try:
-            with Image.open(io.BytesIO(stream)) as image:
-                image.load()
-                frame = image.convert("RGB")
-                frame.load()
-                frames.append(frame)
-        except (OSError, SyntaxError) as error:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(stream)) as image:
+                    image.load()
+                    frame = image.convert("RGB")
+                    frame.load()
+                    frames.append(frame)
+        except (OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
             for frame in frames:
                 frame.close()
             raise PdfQualityError("PDF raster frame could not be decoded") from error
