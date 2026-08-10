@@ -189,7 +189,7 @@ class NativeDistributionContractTests(unittest.TestCase):
                 reference = line.split("uses:", 1)[1].strip().split()[0]
                 self.assertRegex(reference, r"^[^@]+@[0-9a-f]{40}$")
 
-    def test_rc2_version_sources_and_quality_runtime_are_consistent(self):
+    def test_version_sources_and_quality_runtime_are_consistent(self):
         root = Path(__file__).resolve().parents[1]
         pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
         package = (root / "comic_sol_product/__init__.py").read_text(encoding="utf-8")
@@ -197,11 +197,13 @@ class NativeDistributionContractTests(unittest.TestCase):
         assembler = (root / "scripts/assemble_release.py").read_text(encoding="utf-8")
         compose = (root / "compose.yaml").read_text(encoding="utf-8")
         release_contract = (root / "comic_sol_product/release.py").read_text(encoding="utf-8")
-        self.assertIn("2.0.0rc4", pyproject)
-        self.assertIn("2.0.0rc4", package)
+        version = (root / "comic_sol_product/version.py").read_text(encoding="utf-8")
+        self.assertIn('dynamic = ["version"]', pyproject)
+        self.assertIn("from .version import VERSION", package)
+        self.assertIn('VERSION = "2.0.0rc4"', version)
         self.assertIn("__version__", distribution)
         self.assertIn("__version__", assembler)
-        self.assertIn("2.0.0rc4", compose)
+        self.assertIn("comic-sol:2.0.0rc4", compose)
         for module in (
             "normalize_panels.py", "typography.py", "layouts.py", "page_quality.py",
             "pdf_quality.py", "quality_sample.py",

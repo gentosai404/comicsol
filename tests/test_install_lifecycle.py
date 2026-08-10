@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import unittest
 import zipfile
@@ -86,6 +87,16 @@ class NativeInstallLifecycleTests(unittest.TestCase):
         self.assertEqual("removed", result.status)
         self.assertFalse(self.install_root.exists())
         self.assertEqual("project-data", (self.projects / "keep.txt").read_text())
+
+    def test_public_installers_use_current_runtime_version_and_rollback_hooks(self):
+        root = Path(__file__).resolve().parents[1]
+        posix = (root / "installers/install.sh").read_text(encoding="utf-8")
+        powershell = (root / "installers/install.ps1").read_text(encoding="utf-8")
+        for script in (posix, powershell):
+            self.assertIsNone(re.search(r"\b\d+\.\d+\.\d+(?:rc\d+)?\b", script))
+            self.assertIn("--version", script)
+        self.assertIn("rollback()", posix)
+        self.assertIn("Restore-Install", powershell)
 
     def test_public_installers_verify_checksum_health_and_preserve_projects(self):
         root = Path(__file__).resolve().parents[1]

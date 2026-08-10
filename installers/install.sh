@@ -1,7 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="2.0.0rc4"
 INSTALL_ROOT="${COMIC_SOL_INSTALL_ROOT:-$HOME/.local/share/comic-sol}"
 ARCHIVE=""
 SHA256=""
@@ -31,7 +30,42 @@ if [ -z "$SHA256" ]; then
 fi
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT INT TERM
+INSTALL_STARTED=0
+COMMITTED=0
+PREVIOUS_VERSION=""
+PREVIOUS_POINTER=0
+TARGET=""
+TARGET_BACKUP=""
+STABLE_RUNTIME=""
+STABLE_BACKUP=""
+STABLE_PUBLISHED=0
+TARGET_PUBLISHED=0
+ROLLED_BACK=0
+rollback() {
+  [ "$INSTALL_STARTED" -eq 1 ] || return 0
+  [ "$COMMITTED" -eq 1 ] || [ "$ROLLED_BACK" -eq 1 ] && return 0
+  ROLLED_BACK=1
+  if [ -n "$STABLE_BACKUP" ] && [ -d "$STABLE_BACKUP" ]; then
+    rm -rf -- "$STABLE_RUNTIME"
+    mv -- "$STABLE_BACKUP" "$STABLE_RUNTIME"
+  elif [ "$STABLE_PUBLISHED" -eq 1 ]; then
+    rm -rf -- "$STABLE_RUNTIME"
+  fi
+  if [ -n "$TARGET_BACKUP" ] && [ -d "$TARGET_BACKUP" ]; then
+    rm -rf -- "$TARGET"
+    mv -- "$TARGET_BACKUP" "$TARGET"
+  elif [ "$TARGET_PUBLISHED" -eq 1 ]; then
+    rm -rf -- "$TARGET"
+  fi
+  rm -rf -- "$TARGET.new" "$INSTALL_ROOT/bin.new"
+  if [ "$PREVIOUS_POINTER" -eq 1 ]; then
+    printf '%s\n' "$PREVIOUS_VERSION" > "$INSTALL_ROOT/active-version"
+  else
+    rm -f -- "$INSTALL_ROOT/active-version"
+  fi
+}
+trap 'rollback; rm -rf -- "$TMP"' EXIT INT TERM
+
 if [ -n "$URL" ]; then
   ARCHIVE="$TMP/comic-sol.zip"
   curl -fL --proto '=https' --tlsv1.2 "$URL" -o "$ARCHIVE"
@@ -56,8 +90,6 @@ validate_zip() {
     esac
     case "$member" in
       ../*|*/../*|./*|*/./*|*//*|/*) echo "unsafe archive member: $member" >&2; exit 1 ;;
-    esac
-    case "$member" in
       *\\*|[A-Za-z]:/*) echo "unsafe archive member: $member" >&2; exit 1 ;;
     esac
   done; then
@@ -77,30 +109,42 @@ case "$ARCHIVE" in
   *) echo "Unsupported archive; POSIX installer currently requires .zip" >&2; exit 2 ;;
 esac
 RUNTIME="$STAGE/comic-sol"
-if [ ! -d "$RUNTIME" ]; then
-  echo "archive must contain top-level comic-sol runtime" >&2
+EXE="$RUNTIME/comic-sol"
+[ -d "$RUNTIME" ] || { echo "archive must contain top-level comic-sol runtime" >&2; exit 1; }
+[ -f "$EXE" ] || { echo "archive executable is missing" >&2; exit 1; }
+chmod 755 "$EXE"
+VERSION_OUTPUT=$("$EXE" --version) || { echo "unable to determine a valid runtime version" >&2; exit 1; }
+VERSION=$(printf '%s\n' "$VERSION_OUTPUT" | awk 'NR == 1 && $1 == "comic-sol" { print $2 }')
+if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$'; then
+  echo "unable to determine a valid runtime version" >&2
   exit 1
 fi
-EXE="$RUNTIME/comic-sol"
-chmod 755 "$EXE"
 "$EXE" doctor --output-root "${COMIC_SOL_OUTPUT_ROOT:-$HOME/Comic Sol}"
 
+INSTALL_STARTED=1
 VERSIONS="$INSTALL_ROOT/versions"
 TARGET="$VERSIONS/$VERSION"
+TARGET_BACKUP="$VERSIONS/.${VERSION}.rollback"
+STABLE_RUNTIME="$INSTALL_ROOT/bin"
+STABLE_BACKUP="$INSTALL_ROOT/.bin.rollback"
 mkdir -p "$VERSIONS" "$INSTALL_ROOT"
-rm -rf "$TARGET.new"
-mv "$RUNTIME" "$TARGET.new"
-rm -rf "$TARGET"
-mv "$TARGET.new" "$TARGET"
-rm -rf "$INSTALL_ROOT/bin.new" "$INSTALL_ROOT/bin.rollback"
-cp -R "$TARGET" "$INSTALL_ROOT/bin.new"
-if [ -d "$INSTALL_ROOT/bin" ]; then
-  mv "$INSTALL_ROOT/bin" "$INSTALL_ROOT/bin.rollback"
+rm -rf -- "$TARGET_BACKUP" "$STABLE_BACKUP"
+if [ -f "$INSTALL_ROOT/active-version" ]; then
+  PREVIOUS_POINTER=1
+  PREVIOUS_VERSION=$(cat "$INSTALL_ROOT/active-version")
 fi
-mv "$INSTALL_ROOT/bin.new" "$INSTALL_ROOT/bin"
-rm -rf "$INSTALL_ROOT/bin.rollback"
+mv -- "$RUNTIME" "$TARGET.new"
+if [ -d "$TARGET" ]; then mv -- "$TARGET" "$TARGET_BACKUP"; fi
+mv -- "$TARGET.new" "$TARGET"
+TARGET_PUBLISHED=1
+cp -R -- "$TARGET" "$INSTALL_ROOT/bin.new"
+if [ -d "$STABLE_RUNTIME" ]; then mv -- "$STABLE_RUNTIME" "$STABLE_BACKUP"; fi
+mv -- "$INSTALL_ROOT/bin.new" "$STABLE_RUNTIME"
+STABLE_PUBLISHED=1
 printf '%s\n' "$VERSION" > "$INSTALL_ROOT/active-version.new"
-mv "$INSTALL_ROOT/active-version.new" "$INSTALL_ROOT/active-version"
+mv -- "$INSTALL_ROOT/active-version.new" "$INSTALL_ROOT/active-version"
+rm -rf -- "$STABLE_BACKUP" "$TARGET_BACKUP"
+COMMITTED=1
 
 echo "Installed unsigned Comic Sol $VERSION at $INSTALL_ROOT"
 echo "Add $INSTALL_ROOT/bin to PATH. User projects are outside this directory."

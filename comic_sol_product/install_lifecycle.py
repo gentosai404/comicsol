@@ -49,10 +49,19 @@ def _publish_runtime(source: Path, destination: Path) -> Path | None:
     shutil.rmtree(pending, ignore_errors=True)
     shutil.rmtree(rollback, ignore_errors=True)
     shutil.copytree(source, pending, copy_function=shutil.copy2)
-    if destination.exists():
-        os.replace(destination, rollback)
-    os.replace(pending, destination)
-    return rollback if rollback.exists() else None
+    moved_previous = False
+    try:
+        if destination.exists():
+            os.replace(destination, rollback)
+            moved_previous = True
+        os.replace(pending, destination)
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        if moved_previous and rollback.exists():
+            os.replace(rollback, destination)
+        shutil.rmtree(pending, ignore_errors=True)
+        raise
+    return rollback if moved_previous else None
 
 
 def read_active_version(install_root: Path) -> str | None:
@@ -109,7 +118,7 @@ def install_archive(
         _atomic_write(install_root / "active-version", f"{version}\n".encode("utf-8"))
         if rollback_runtime is not None:
             shutil.rmtree(rollback_runtime, ignore_errors=True)
-    except Exception:
+    except BaseException:
         shutil.rmtree(target, ignore_errors=True)
         shutil.rmtree(stable_runtime, ignore_errors=True)
         if rollback_runtime is not None and rollback_runtime.exists():
