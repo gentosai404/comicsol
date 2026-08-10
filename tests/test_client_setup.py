@@ -87,6 +87,70 @@ class ClientSetupTests(unittest.TestCase):
         self.assertEqual(config.read_bytes(), original)
         self.assertIsNotNone(result.backup_path)
 
+    def test_json_verify_rejects_parseable_but_unsafe_comic_sol_entries(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        cases = (
+            {"command": "evil", "args": []},
+            {"command": "comic-sol", "args": ["run"]},
+            {"command": "comic-sol", "args": ["mcp", "--root", "relative-root"]},
+        )
+        for entry in cases:
+            with self.subTest(entry=entry):
+                config.write_text(
+                    json.dumps({"mcpServers": {"comic-sol": entry}}),
+                    encoding="utf-8",
+                )
+                self.assertFalse(JsonClientAdapter("cursor", config, "mcpServers").verify())
+
+    def test_codex_verify_rejects_parseable_but_unsafe_comic_sol_entry(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            '[mcp_servers.comic-sol]\ncommand = "evil"\nargs = []\n',
+            encoding="utf-8",
+        )
+        self.assertFalse(CodexAdapter(config).verify())
+
+    def test_verify_rejects_duplicate_root_argument(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps({"mcpServers": {"comic-sol": {
+                "command": "comic-sol",
+                "args": ["mcp", "--root", str(self.output.resolve()), "--root", str(self.output.resolve())],
+            }}}),
+            encoding="utf-8",
+        )
+        self.assertFalse(JsonClientAdapter("cursor", config, "mcpServers").verify())
+
+    def test_type_error_from_verify_hook_is_not_retried(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("{}", encoding="utf-8")
+        calls = []
+
+        def hook(expected):
+            calls.append(expected)
+            raise TypeError("hook failure")
+
+        with self.assertRaisesRegex(TypeError, "hook failure"):
+            JsonClientAdapter("cursor", config, "mcpServers", verify_hook=hook).verify({})
+        self.assertEqual(1, len(calls))
+
+    def test_zero_argument_verify_hook_is_supported(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("{}", encoding="utf-8")
+        calls = []
+
+        def hook():
+            calls.append(True)
+            return False
+
+        self.assertFalse(JsonClientAdapter("cursor", config, "mcpServers", verify_hook=hook).verify({}))
+        self.assertEqual([True], calls)
+
     def test_codex_toml_preserves_existing_config_and_is_idempotent(self):
         config = self.home / ".codex" / "config.toml"
         config.parent.mkdir(parents=True)

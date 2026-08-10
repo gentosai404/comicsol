@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +83,42 @@ class ContainedProjectPathTests(unittest.TestCase):
             nested.resolve(),
             contained_project_path(self.project, "panels/image.png", must_exist=True),
         )
+
+    def test_read_contained_bytes_rejects_final_symlink(self):
+        outside = self.root / "outside.txt"
+        outside.write_bytes(b"outside")
+        link = self.project / "linked.txt"
+        make_symlink(self, link, outside)
+        with self.assertRaisesRegex(ValueError, "symlink|escapes"):
+            project_io.read_contained_bytes(self.project, "linked.txt")
+
+    def test_open_path_nofollow_rejects_intermediate_symlink(self):
+        outside = self.root / "outside-dir"
+        outside.mkdir()
+        (outside / "value.txt").write_text("outside", encoding="utf-8")
+        link = self.project / "linked-dir"
+        make_symlink(self, link, outside, directory=True)
+        with self.assertRaises((OSError, ValueError)):
+            project_io.open_path_nofollow(link / "value.txt")
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS alias behavior requires macOS")
+    def test_open_path_nofollow_allows_macos_var_alias_only(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp", prefix="comic-sol-") as temporary:
+            target = Path(temporary) / "value.txt"
+            target.write_bytes(b"var-alias")
+            with project_io.open_path_nofollow(target) as stream:
+                self.assertEqual(b"var-alias", stream.read())
+
+    @unittest.skipUnless(os.name == "posix", "macOS alias behavior requires POSIX")
+    def test_open_path_nofollow_handles_deep_macos_temp_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            nested = Path(temporary) / "output" / "project" / "panels" / "p01-01"
+            nested.mkdir(parents=True)
+            target = nested / "lettered.png"
+            target.write_bytes(b"deep-temp")
+            with mock.patch.object(sys, "platform", "darwin"):
+                with project_io.open_path_nofollow(target) as stream:
+                    self.assertEqual(b"deep-temp", stream.read())
 
 
 class DurableWriteTests(unittest.TestCase):
@@ -173,14 +210,14 @@ class ProjectTransactionTests(unittest.TestCase):
         real_replace = project_io.os.replace
         calls = 0
 
-        def fail_second_staged_replace(source, destination):
+        def fail_second_staged_replace(source, destination, **kwargs):
             nonlocal calls
             source_path = Path(source)
             if source_path.name.startswith("staged-"):
                 calls += 1
                 if calls == 2:
                     raise OSError("injected second publish failure")
-            return real_replace(source, destination)
+            return real_replace(source, destination, **kwargs)
 
         with self.assertRaisesRegex(OSError, "injected second publish failure"):
             with mock.patch.object(project_io.os, "replace", side_effect=fail_second_staged_replace):
@@ -196,14 +233,14 @@ class ProjectTransactionTests(unittest.TestCase):
         real_replace = project_io.os.replace
         calls = 0
 
-        def interrupt_after_first(source, destination):
+        def interrupt_after_first(source, destination, **kwargs):
             nonlocal calls
             source_path = Path(source)
             if source_path.name.startswith("staged-"):
                 calls += 1
                 if calls == 2:
                     raise KeyboardInterrupt("simulated process interruption")
-            return real_replace(source, destination)
+            return real_replace(source, destination, **kwargs)
 
         tx = project_io.ProjectTransaction(self.project, "composition")
         tx.__enter__()
@@ -226,13 +263,13 @@ class ProjectTransactionTests(unittest.TestCase):
     def test_rollback_removes_newly_created_targets_without_backup(self):
         real_replace = project_io.os.replace
         staged_calls = 0
-        def fail_second_publish(source, destination):
+        def fail_second_publish(source, destination, **kwargs):
             nonlocal staged_calls
             if Path(source).name.startswith("staged-"):
                 staged_calls += 1
                 if staged_calls == 2:
                     raise OSError("injected second publish failure")
-            return real_replace(source, destination)
+            return real_replace(source, destination, **kwargs)
         with self.assertRaisesRegex(OSError, "injected second publish failure"):
             with mock.patch.object(project_io.os, "replace", side_effect=fail_second_publish):
                 with project_io.ProjectTransaction(self.project, "composition") as transaction:
@@ -249,14 +286,14 @@ class ProjectTransactionTests(unittest.TestCase):
         (self.project / "pages/page-002.png").unlink()
         real_replace = project_io.os.replace
         calls = 0
-        def interrupt_after_first(source, destination):
+        def interrupt_after_first(source, destination, **kwargs):
             nonlocal calls
             source_path = Path(source)
             if source_path.name.startswith("staged-"):
                 calls += 1
                 if calls == 1:
                     raise KeyboardInterrupt("simulated interruption")
-            return real_replace(source, destination)
+            return real_replace(source, destination, **kwargs)
         tx = project_io.ProjectTransaction(self.project, "first-composition")
         tx.__enter__()
         tx.stage_bytes("pages/page-001.png", b"page-one")

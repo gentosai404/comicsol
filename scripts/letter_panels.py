@@ -20,7 +20,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from comic_sol import atomic_write_bytes, canonical_artifact_bytes, read_json, sha256_file
-from project_io import ProjectTransaction, contained_project_path
+from project_io import ProjectTransaction, contained_project_path, open_path_nofollow, read_contained_bytes
 from typography import (
     lettering_geometry_hash,
     preflight_text_items,
@@ -859,21 +859,28 @@ def letter_panel(
     panel_height: int,
     text_items: list[dict],
     character_bible: list[dict],
+    *,
+    source_bytes: bytes | None = None,
 ) -> dict:
-    """Letter an existing panel atomically and return a compact output summary."""
+    """Letter a panel atomically and return a compact output summary."""
     if not isinstance(panel_width, int) or not isinstance(panel_height, int) or panel_width <= 0 or panel_height <= 0:
         raise ValueError("panel dimensions must be positive integers")
     if not isinstance(text_items, list) or not isinstance(character_bible, list):
         raise TypeError("text_items and character_bible must be lists")
     path = Path(output_path)
     try:
-        with Image.open(path) as source:
+        stream = io.BytesIO(source_bytes) if source_bytes is not None else open_path_nofollow(path)
+        with stream, Image.open(stream) as source:
             _validate_decoded_pixels(source.size, path)
             base = ImageOps.exif_transpose(source).convert("RGBA")
             if base.size != (panel_width, panel_height):
                 base = ImageOps.fit(base, (panel_width, panel_height), method=Image.Resampling.LANCZOS)
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
-        raise ValueError(f"panel is not a readable image: {path}") from error
+        detail = type(error).__name__
+        errno_value = getattr(error, "errno", None)
+        if errno_value is not None:
+            detail += f" errno={errno_value}"
+        raise ValueError(f"panel is not a readable image ({detail}): {path}") from error
 
     ordered = sorted(
         (dict(item) for item in text_items),
@@ -1077,18 +1084,17 @@ def _letter_project_with_summaries(
             )
             try:
                 source = contained_project_path(project_dir, source_relative, must_exist=True)
-                with Image.open(source) as image:
+                source_bytes = read_contained_bytes(project_dir, source_relative)
+                with Image.open(io.BytesIO(source_bytes)) as image:
                     _validate_decoded_pixels(image.size, source)
                     image.load()
                     width, height = image.size
-                source = contained_project_path(project_dir, source_relative, must_exist=True)
-                source_bytes = source.read_bytes()
             except (OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
                 raise ValueError(f"panel {panel_id} is not a readable image") from error
             staged_path = temporary_root / f"{panel_id}.png"
-            atomic_write_bytes(staged_path, source_bytes)
             summary = letter_panel(
-                str(staged_path), width, height, panel.get("text", []), bible
+                str(staged_path), width, height, panel.get("text", []), bible,
+                source_bytes=source_bytes,
             )
             destination_relative = f"panels/{panel_id}/lettered.png"
             destination = contained_project_path(project_dir, destination_relative)
@@ -1098,7 +1104,7 @@ def _letter_project_with_summaries(
             geometry: dict[str, object] = {
                 "bindings": {
                     "clean_path": source_relative,
-                    "clean_sha256": sha256_file(source),
+                    "clean_sha256": hashlib.sha256(source_bytes).hexdigest(),
                     "font_policy_sha256": preflight["font_policy_sha256"],
                     "storyboard_path": "plan/storyboard.json",
                     "storyboard_sha256": storyboard_sha256,
