@@ -30,7 +30,7 @@ the one pinned dependency:
 git clone https://github.com/wenn-id/comicsol.git \
   "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
 cd "${CODEX_HOME:-$HOME/.codex}/skills/comic-sol"
-python3.11 -m pip install -r requirements.txt
+python3.11 -m pip install --require-hashes -r requirements/locks/base-linux-x86_64.txt
 ```
 
 The host-agnostic rule is: clone or copy this repository as one `comic-sol` folder
@@ -43,7 +43,7 @@ Windows PowerShell:
 git clone https://github.com/wenn-id/comicsol.git `
   "$env:USERPROFILE\.codex\skills\comic-sol"
 Set-Location "$env:USERPROFILE\.codex\skills\comic-sol"
-py -3.11 -m pip install -r requirements.txt
+py -3.11 -m pip install --require-hashes -r requirements/locks/base-windows-x86_64.txt
 ```
 
 Supported environments are Linux, macOS, Windows, and WSL with Python 3.11 and
@@ -110,11 +110,25 @@ The CLI `status`, `validate`, `resume`, and `finalize` commands accept a project
 path directly. For the same containment model, keep project paths beneath the
 output root and use MCP when an explicit fixed root is required.
 
-To run the MCP adapter, install the SDK alongside Pillow:
+To run the MCP adapter, install the SDK alongside Pillow. Use matching command
+and lockfile for host platform:
 
 ```bash
+# Linux
 python3.11 -m venv ~/.venvs/comic-sol-mcp
-~/.venvs/comic-sol-mcp/bin/pip install -r requirements.txt -r requirements-mcp.txt
+~/.venvs/comic-sol-mcp/bin/pip install --require-hashes -r requirements/locks/runtime-linux-x86_64.txt
+```
+
+```bash
+# macOS
+python3.11 -m venv ~/.venvs/comic-sol-mcp
+~/.venvs/comic-sol-mcp/bin/pip install --require-hashes -r requirements/locks/runtime-macos-x86_64.txt
+```
+
+```powershell
+# Windows
+py -3.11 -m venv $HOME\.venvs\comic-sol-mcp
+& $HOME\.venvs\comic-sol-mcp\Scripts\pip.exe install --require-hashes -r requirements/locks/runtime-windows-x86_64.txt
 ```
 
 From the repository root, start the development server with a repository-relative
@@ -129,8 +143,15 @@ For an MCP client configuration, lock the server to one absolute output root and
 keep sampling disabled. An installed package uses the stable launcher:
 
 ```bash
-python3.11 -m pip install '.[mcp]'
-comic-sol mcp --root /absolute/path/to/comic-sol-output
+~/.venvs/comic-sol-mcp/bin/pip install --no-deps '.[mcp]'
+~/.venvs/comic-sol-mcp/bin/comic-sol mcp --root /absolute/path/to/comic-sol-output
+```
+
+On native Windows PowerShell:
+
+```powershell
+& "$HOME\.venvs\comic-sol-mcp\Scripts\pip.exe" install --no-deps ".[mcp]"
+& "$HOME\.venvs\comic-sol-mcp\Scripts\comic-sol.exe" mcp --root C:\absolute\path\to\comic-sol-output
 ```
 
 Transactional client integration is available through:
@@ -252,7 +273,7 @@ Create a clean virtual environment and install only the base dependency:
 
 ```bash
 python3.11 -m venv /tmp/comic-sol-base
-/tmp/comic-sol-base/bin/pip install -r requirements.txt
+/tmp/comic-sol-base/bin/pip install --require-hashes -r requirements/locks/base-linux-x86_64.txt
 /tmp/comic-sol-base/bin/python -m unittest discover -s tests -v
 ```
 
@@ -262,7 +283,7 @@ MCP tests (`test_mcp_server.py`) are skipped gracefully when the `mcp` package i
 
 ```bash
 python3.11 -m venv /tmp/comic-sol-mcp-extra
-/tmp/comic-sol-mcp-extra/bin/pip install -r requirements.txt -r requirements-mcp.txt
+/tmp/comic-sol-mcp-extra/bin/pip install --require-hashes -r requirements/locks/runtime-linux-x86_64.txt
 /tmp/comic-sol-mcp-extra/bin/python -m unittest discover -s tests -v
 ```
 
