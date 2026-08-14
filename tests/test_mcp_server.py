@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -176,44 +177,70 @@ class McpServerUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, "relative project path"):
             mcp_server._validate_relative_path("-/" * 30 + "!")
 
-    def test_tool_errors_never_leak_local_paths_or_sensitive_values(self):
+    def test_tool_request_validation_rejects_unsafe_inputs(self):
         project = self.root / "project"
         project.mkdir()
         with self.assertRaisesRegex(ToolError, "invalid project ID"):
             mcp_server.comic_transition("C:\\\\Users\\\\secret-user", "PLANNED")
-        with self.assertRaisesRegex(ToolError, "sensitive request setting") as context:
-            mcp_server.comic_init("Story", "source", {"api_key": "do-not-leak"})
-        self.assertNotIn("do-not-leak", str(context.exception))
         with self.assertRaisesRegex(ToolError, "unknown validation stage"):
             mcp_server.comic_validate("project", "../secret")
         with self.assertRaisesRegex(ToolError, "relative project path"):
             mcp_server.comic_record_attempt("project", "p01-01", "initial", "C:escape.png")
-        self.assertEqual(
-            "<path>",
-            mcp_server._safe_message(FileNotFoundError(str(self.root / "secret-file"))),
-        )
-        self.assertNotIn(str(self.root), mcp_server._safe_message(FileNotFoundError(str(self.root / "secret-file"))))
-        for quote, path in (
-            ("'", "/tmp/Comic Sol/private payload.json"),
-            ('"', r"C:\\\\Comic Sol\\\\private payload.json"),
-        ):
-            with self.subTest(quote=quote, path=path):
-                message = mcp_server._safe_message(RuntimeError(f"provider failed at {quote}{path}{quote}"))
-                self.assertEqual(f"provider failed at {quote}<path>{quote}", message)
-                self.assertNotIn(path, message)
-        for raw, expected in (
-            ("provider returned api_key=sk-live-1234", "provider returned api_key=<redacted>"),
-            ("config value sk-live-1234 is invalid", "config value sk-live-1234 is invalid"),
-            ('{"access_token": "ghp_abc123", "client_secret": "s3cr3t"}', '{"<redacted>": "<redacted>", "<redacted>": "<redacted>"}'),
-        ):
-            with self.subTest(raw=raw):
-                self.assertEqual(expected, mcp_server._safe_message(RuntimeError(raw)))
-                self.assertNotIn("ghp_abc123", mcp_server._safe_message(RuntimeError(raw)))
-                self.assertNotIn("s3cr3t", mcp_server._safe_message(RuntimeError(raw)))
 
-    def test_init_rejects_non_string_request_setting_keys(self):
+    def test_tool_error_maps_exception_categories_to_safe_messages(self):
+        cases = (
+            (FileNotFoundError("password=file-value"), "not-found: required project data was not found"),
+            (PermissionError("password=permission-value"), "permission-denied: project data could not be accessed"),
+            (OSError("password=os-value"), "io-error: project data operation failed"),
+            (UnicodeError("password=unicode-value"), "invalid-data: project data encoding is invalid"),
+            (ValueError("password=value-error"), "invalid-data: tool request or project data is invalid"),
+            (TypeError("password=type-error"), "invalid-data: tool request or project data is invalid"),
+            (RuntimeError("password=runtime-value"), "internal-error: tool operation failed"),
+        )
+        for error, expected in cases:
+            with self.subTest(error_type=type(error).__name__):
+                converted = str(mcp_server._tool_error(error))
+                self.assertEqual(expected, converted)
+                self.assertNotIn("password=", converted)
+
+    def test_tool_errors_never_leak_credentials_or_paths(self):
+        cases = (
+            ('password="top secret"', ("top secret",)),
+            ("PASSWORD='mixed case value'", ("mixed case value",)),
+            ('{"outer":{"Api_Key":"nested json value"}}', ("nested json value",)),
+            ("authorization: Bearer bearer-value", ("bearer-value",)),
+            ("Bearer standalone-value", ("standalone-value",)),
+            (
+                "token=first-value; client_secret: second value",
+                ("first-value", "second value"),
+            ),
+        )
+        for raw, secrets in cases:
+            with self.subTest(raw=raw):
+                converted = str(mcp_server._tool_error(RuntimeError(raw)))
+                self.assertEqual("internal-error: tool operation failed", converted)
+                for secret in secrets:
+                    self.assertNotIn(secret, converted)
+
+        raw_path = str(self.root / "private payload.json")
+        converted = str(mcp_server._tool_error(FileNotFoundError(raw_path)))
+        self.assertEqual("not-found: required project data was not found", converted)
+        self.assertNotIn(raw_path, converted)
+
+    def test_init_uses_only_allowlisted_request_error_messages(self):
         before = list(self.root.iterdir())
-        with self.assertRaisesRegex(ToolError, "keys must be strings"):
+        with self.assertRaisesRegex(
+            ToolError,
+            "^invalid-request: sensitive request setting is not allowed$",
+        ) as context:
+            mcp_server.comic_init("Story", "source", {"api_key": "do-not-leak"})
+        self.assertNotIn("api_key", str(context.exception))
+        self.assertNotIn("do-not-leak", str(context.exception))
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "^invalid-request: request setting keys must be strings$",
+        ):
             mcp_server.comic_init("Story", "source", {1: "short_prompt"})
         self.assertEqual(before, list(self.root.iterdir()))
 
@@ -232,15 +259,154 @@ class McpServerUnitTests(unittest.TestCase):
     def test_symlink_scan_is_cached_per_project_and_invalidated_on_change(self):
         project = self.root / "cached-project"
         project.mkdir()
+        project = project.resolve()
         (project / "project.json").write_text("{}", encoding="utf-8")
         mcp_server._resolve_project("cached-project")
         cached = mcp_server._SYMLINK_SCAN_CACHE.get("cached-project")
         self.assertIsNotNone(cached)
         mcp_server._resolve_project("cached-project")
         self.assertIs(cached, mcp_server._SYMLINK_SCAN_CACHE.get("cached-project"))
+        cached_root_identity = cached[1]["."][:6]
+        real_lstat = Path.lstat
         (project / "arbitrary.txt").write_text("changed")
-        mcp_server._resolve_project("cached-project")
+        changed_project_metadata = SimpleNamespace(
+            st_mode=project.lstat().st_mode,
+            st_dev=cached_root_identity[0],
+            st_ino=cached_root_identity[1],
+            st_mtime_ns=cached_root_identity[2] + 1_000_000_000,
+            st_ctime_ns=cached_root_identity[3],
+            st_size=cached_root_identity[4],
+            st_nlink=cached_root_identity[5],
+        )
+        changed_root_identity = (
+            *cached_root_identity[:2],
+            cached_root_identity[2] + 1_000_000_000,
+            *cached_root_identity[3:],
+        )
+        self.assertEqual(mcp_server._directory_identity(changed_project_metadata), changed_root_identity)
+
+        def deterministic_lstat(path):
+            return changed_project_metadata if path == project else real_lstat(path)
+
+        with mock.patch.object(Path, "lstat", new=deterministic_lstat):
+            mcp_server._resolve_project("cached-project")
         self.assertIsNot(cached, mcp_server._SYMLINK_SCAN_CACHE.get("cached-project"))
+
+    def test_symlink_cache_hit_avoids_directory_rescan(self):
+        project = self.root / "unchanged-project"
+        (project / "nested").mkdir(parents=True)
+        (project / "project.json").write_text("{}", encoding="utf-8")
+        expected = mcp_server._resolve_project("unchanged-project")
+
+        with mock.patch.object(
+            mcp_server.os,
+            "scandir",
+            side_effect=AssertionError("cache hit rescanned the project"),
+        ):
+            actual = mcp_server._resolve_project("unchanged-project")
+
+        self.assertEqual(expected, actual)
+
+    @unittest.skipIf(sys.platform == "win32", "requires POSIX symlink semantics")
+    def test_symlink_created_during_scan_is_rejected(self):
+        project = self.root / "racing-project"
+        nested = project / "nested"
+        nested.mkdir(parents=True)
+        nested = nested.resolve()
+        (project / "project.json").write_text("{}", encoding="utf-8")
+        outside = Path(self.temporary_directory.name) / "secret.txt"
+        outside.write_text("secret", encoding="utf-8")
+        real_scandir = mcp_server.os.scandir
+        real_lstat = Path.lstat
+        stable_nested_metadata = nested.lstat()
+        changed_nested_metadata = SimpleNamespace(
+            st_mode=stable_nested_metadata.st_mode,
+            st_dev=stable_nested_metadata.st_dev,
+            st_ino=stable_nested_metadata.st_ino,
+            st_mtime_ns=stable_nested_metadata.st_mtime_ns + 1_000_000_000,
+            st_ctime_ns=stable_nested_metadata.st_ctime_ns,
+            st_size=stable_nested_metadata.st_size,
+            st_nlink=stable_nested_metadata.st_nlink,
+        )
+        stable_identity = mcp_server._directory_identity(stable_nested_metadata)
+        changed_identity = mcp_server._directory_identity(changed_nested_metadata)
+        self.assertEqual(changed_identity[2], stable_identity[2] + 1_000_000_000)
+        self.assertEqual(changed_identity[:2], stable_identity[:2])
+        self.assertEqual(changed_identity[3:], stable_identity[3:])
+        injected = False
+
+        class InjectOnExhaustion:
+            def __init__(self, iterator):
+                self.iterator = iterator
+
+            def __enter__(self):
+                self.iterator.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.iterator.__exit__(*args)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                nonlocal injected
+                try:
+                    return next(self.iterator)
+                except StopIteration:
+                    if not injected:
+                        make_symlink(self_test, nested / "late-link", outside)
+                        injected = True
+                    raise
+
+        self_test = self
+
+        def injecting_scandir(path):
+            iterator = real_scandir(path)
+            if Path(path) == nested and not injected:
+                return InjectOnExhaustion(iterator)
+            return iterator
+
+        def deterministic_lstat(path):
+            if path == nested:
+                return changed_nested_metadata if injected else stable_nested_metadata
+            return real_lstat(path)
+
+        with (
+            mock.patch.object(Path, "lstat", new=deterministic_lstat),
+            mock.patch.object(mcp_server.os, "scandir", side_effect=injecting_scandir),
+        ):
+            with self.assertRaisesRegex(ToolError, "symlink|changed during validation"):
+                mcp_server._resolve_project("racing-project")
+
+    @unittest.skipIf(sys.platform == "win32", "requires POSIX symlink semantics")
+    def test_disappearing_project_root_cannot_leave_trusted_empty_cache(self):
+        project = self.root / "recreated-project"
+        project.mkdir()
+        (project / "project.json").write_text("{}", encoding="utf-8")
+        resolved = mcp_server._resolve_project("recreated-project")
+        real_is_dir = Path.is_dir
+        removed = False
+
+        def remove_after_root_validation(path):
+            nonlocal removed
+            result = real_is_dir(path)
+            if path == resolved and result and not removed:
+                shutil.rmtree(path)
+                removed = True
+            return result
+
+        with mock.patch.object(Path, "is_dir", new=remove_after_root_validation):
+            with self.assertRaises(ToolError):
+                mcp_server._resolve_project("recreated-project")
+
+        project.mkdir()
+        (project / "project.json").write_text("{}", encoding="utf-8")
+        outside = Path(self.temporary_directory.name) / "secret.txt"
+        outside.write_text("secret", encoding="utf-8")
+        make_symlink(self, project / "late-link", outside)
+        with self.assertRaisesRegex(ToolError, "symlink"):
+            mcp_server._resolve_project("recreated-project")
 
     def test_override_tool_accepts_valid_v2_visual_failure(self):
         project = self.root / "sunlight-courier"

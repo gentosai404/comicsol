@@ -1,7 +1,8 @@
 import argparse
 import os
 import re
-from pathlib import Path, PurePosixPath, PureWindowsPath
+import stat
+from pathlib import Path
 from typing import Any, Literal
 
 try:
@@ -38,19 +39,29 @@ from render_report import render_report
 # Root directory allowed for operations. All project IDs resolve relative to this.
 OUTPUT_ROOT: Path
 
-# Successful symlink scans are cached per project ID. Recursive directory
-# fingerprints invalidate safely when nested entries change, while repeated calls
-# skip the full symlink-entry inspection.
+# Successful symlink scans are cached per project ID. Unchanged directories need
+# only an lstat; changed and newly discovered directories are scanned again.
+_DirectorySnapshot = tuple[int, int, int, int, int, int, tuple[str, ...]]
 _SYMLINK_SCAN_CACHE: dict[
     str,
-    tuple[Path, tuple[tuple[str, int, tuple[str, ...]], ...]],
+    tuple[Path, dict[str, _DirectorySnapshot]],
 ] = {}
-_SENSITIVE_NAME = r"api[_-]?key|access[_-]?token|client[_-]?secret|authorization|credential|password|private[_-]?key|secret|token"
 
 _VALIDATION_STAGES = frozenset({"all", "plan", "storyboard", "panels", "final", "export-ready"})
 _PANEL_ID = re.compile(r"^p[0-9]{2}-[0-9]{2}$")
 _ATTEMPT_KINDS = frozenset({"initial", "visual_retry", "transient_repeat"})
 _RELATIVE_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+_REQUEST_ERROR_PREFIXES = (
+    "title must be a non-empty string of at most 200 characters",
+    "source must be at most 200 KiB as UTF-8 bytes",
+    "request_settings must be a JSON object",
+    "sensitive request setting is not allowed",
+    "request setting keys must be strings",
+    "unsupported request setting",
+    "request mode must be one of short_prompt, pasted_story, source_file, or resume",
+    "request language must be a non-empty language tag",
+    "request title must be a non-empty string of at most 200 characters",
+)
 
 
 def _reject(message: str) -> None:
@@ -107,52 +118,30 @@ def _validate_relative_path(relative: str) -> None:
         _reject("attempt path must be a relative project path")
 
 
-def _safe_message(error: Exception) -> str:
-    """Return a message without local absolute paths or sensitive values."""
-    message = str(error)
-    if not message:
-        return type(error).__name__
-
-    def replace_quoted_path(match: re.Match[str]) -> str:
-        """Replace quoted paths with safe display placeholders."""
-        quote, candidate = match.group(1), match.group(2)
-        if PurePosixPath(candidate).is_absolute() or PureWindowsPath(candidate).is_absolute():
-            return f"{quote}<path>{quote}"
-        return match.group(0)
-
-    message = re.sub(r"(['\"])([^'\"]+)\1", replace_quoted_path, message)
-    assignment = re.compile(
-        rf"(?P<quote>['\"]?)(?P<key>{_SENSITIVE_NAME})(?P=quote)"
-        rf"(?P<separator>\s*[:=]\s*)(?P<value_quote>['\"]?)(?P<value>[^'\"}},;\s]+)"
-        rf"(?P=value_quote)",
-        re.IGNORECASE,
-    )
-    message = assignment.sub(
-        lambda match: (
-            f"{match.group('quote')}{'<redacted>' if match.group('quote') else match.group('key')}{match.group('quote')}"
-            f"{match.group('separator')}{match.group('value_quote')}<redacted>"
-            f"{match.group('value_quote')}"
-        ),
-        message,
-    )
-    message = re.sub(
-        rf"(?i)\b(?:{_SENSITIVE_NAME})\b(?!['\"]?\s*[:=])",
-        "<redacted>",
-        message,
-    )
-    for token in message.split():
-        candidate = token.strip("'\"(),:;")
-        if candidate and (
-            PurePosixPath(candidate).is_absolute()
-            or PureWindowsPath(candidate).is_absolute()
-        ):
-            message = message.replace(candidate, "<path>")
-    return message
-
-
 def _tool_error(error: Exception) -> ToolError:
-    """Build a structured MCP tool error response."""
-    return ToolError(_safe_message(error))
+    """Map an internal exception to a stable message without exposing its text."""
+    if isinstance(error, FileNotFoundError):
+        message = "not-found: required project data was not found"
+    elif isinstance(error, PermissionError):
+        message = "permission-denied: project data could not be accessed"
+    elif isinstance(error, OSError):
+        message = "io-error: project data operation failed"
+    elif isinstance(error, UnicodeError):
+        message = "invalid-data: project data encoding is invalid"
+    elif isinstance(error, (ValueError, TypeError)):
+        message = "invalid-data: tool request or project data is invalid"
+    else:
+        message = "internal-error: tool operation failed"
+    return ToolError(message)
+
+
+def _request_error(error: Exception) -> ToolError:
+    """Allowlist known request errors without forwarding dynamic suffixes."""
+    raw_message = str(error)
+    for prefix in _REQUEST_ERROR_PREFIXES:
+        if raw_message.startswith(prefix):
+            return ToolError(f"invalid-request: {prefix}")
+    return _tool_error(error)
 
 
 def _configure_root(path: Path) -> Path:
@@ -166,61 +155,135 @@ def _configure_root(path: Path) -> Path:
     return OUTPUT_ROOT
 
 
-def _directory_entries(
+def _directory_path(project_dir: Path, relative: str) -> Path:
+    return project_dir if relative == "." else project_dir / relative
+
+
+def _discard_snapshot_subtree(
+    snapshots: dict[str, _DirectorySnapshot], relative: str
+) -> None:
+    prefix = f"{relative}/"
+    for cached in tuple(snapshots):
+        if cached == relative or cached.startswith(prefix):
+            snapshots.pop(cached)
+
+
+def _directory_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        metadata.st_size,
+        metadata.st_nlink,
+    )
+
+
+def _scan_directory(
     project_dir: Path,
-) -> tuple[tuple[str, int, tuple[str, ...]], ...]:
-    """Fingerprint directory mtimes and direct entry types across project tree."""
-    records: list[tuple[str, int, tuple[str, ...]]] = []
-    project_dir = project_dir.resolve()
-    for directory, dirnames, filenames in os.walk(project_dir, followlinks=False):
-        root = Path(directory)
-        entries = []
-        for name in (*dirnames, *filenames):
-            candidate = root / name
-            kind = "l" if candidate.is_symlink() else "d" if candidate.is_dir() else "f"
-            entries.append(f"{kind}:{name}")
-        try:
-            relative = root.relative_to(project_dir).as_posix() or "."
-            records.append((relative, root.lstat().st_mtime_ns, tuple(sorted(entries))))
-        except OSError:
+    relative: str,
+    snapshots: dict[str, _DirectorySnapshot],
+) -> list[str]:
+    """Scan one changed directory and return uncached child directories."""
+    directory = _directory_path(project_dir, relative)
+    before = directory.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        _reject("security-error: project directory structure is invalid")
+    children: list[str] = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.is_symlink():
+                _reject("security-error: project contains a symlink")
+            if entry.is_dir(follow_symlinks=False):
+                children.append(entry.name if relative == "." else f"{relative}/{entry.name}")
+
+    after = directory.lstat()
+    if stat.S_ISLNK(after.st_mode) or not stat.S_ISDIR(after.st_mode):
+        _reject("security-error: project directory structure is invalid")
+    identity = _directory_identity(after)
+    if _directory_identity(before) != identity:
+        _reject("security-error: project changed during validation")
+    current_children = tuple(sorted(children))
+    previous_children = snapshots.get(relative, (0, 0, 0, 0, 0, 0, ()))[6]
+    for removed in set(previous_children) - set(current_children):
+        _discard_snapshot_subtree(snapshots, removed)
+    snapshots[relative] = (*identity, current_children)
+    return [child for child in current_children if child not in snapshots]
+
+
+def _scan_subtree(
+    project_dir: Path,
+    relative: str,
+    snapshots: dict[str, _DirectorySnapshot],
+) -> None:
+    pending = [relative]
+    while pending:
+        pending.extend(_scan_directory(project_dir, pending.pop(), snapshots))
+
+
+def _refresh_project_snapshot(
+    project_dir: Path,
+    cached: dict[str, _DirectorySnapshot],
+) -> tuple[dict[str, _DirectorySnapshot], bool]:
+    """Refresh only directories whose own metadata changed."""
+    snapshots = dict(cached)
+    changed = False
+    for relative in sorted(tuple(snapshots), key=lambda item: (item.count("/"), item)):
+        if relative not in snapshots:
             continue
-    return tuple(sorted(records))
-
-
-def _project_fingerprint(
-    project_dir: Path,
-) -> tuple[Path, tuple[tuple[str, int, tuple[str, ...]], ...]]:
-    """Return (resolved project path, recursive directory-entry fingerprint)."""
-    return project_dir.resolve(), _directory_entries(project_dir)
+        directory = _directory_path(project_dir, relative)
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
+            if relative == ".":
+                raise
+            _discard_snapshot_subtree(snapshots, relative)
+            changed = True
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            _reject("security-error: project directory structure is invalid")
+        previous = snapshots[relative]
+        if _directory_identity(metadata) != previous[:6]:
+            _scan_subtree(project_dir, relative, snapshots)
+            changed = True
+    return snapshots, changed
 
 
 def _resolve_project(project_id: str) -> Path:
     """Resolve a project ID safely within OUTPUT_ROOT."""
     try:
         if not project_id or not IDENTIFIER.fullmatch(project_id):
-            raise ValueError("invalid project ID format")
+            _reject("security-error: invalid project ID format")
         candidate = OUTPUT_ROOT / project_id
         if candidate.is_symlink():
-            raise ValueError("project directory resolves outside output root")
+            _reject("security-error: project directory resolves outside output root")
         if not candidate.exists():
-            raise ValueError("project directory is not an initialized Comic Sol project")
+            _reject("security-error: project directory is not an initialized Comic Sol project")
         resolved = candidate.resolve(strict=True)
         if not resolved.is_relative_to(OUTPUT_ROOT) or resolved == OUTPUT_ROOT:
-            raise ValueError("project directory resolves outside output root")
+            _reject("security-error: project directory resolves outside output root")
         if not resolved.is_dir():
-            raise ValueError("project directory is not an initialized Comic Sol project")
-        fingerprint = _project_fingerprint(resolved)
-        if _SYMLINK_SCAN_CACHE.get(project_id) != fingerprint:
-            for directory, dirnames, filenames in os.walk(resolved, followlinks=False):
-                for name in (*dirnames, *filenames):
-                    if (Path(directory) / name).is_symlink():
-                        raise ValueError("project contains a symlink")
-            _SYMLINK_SCAN_CACHE[project_id] = fingerprint
+            _reject("security-error: project directory is not an initialized Comic Sol project")
+        cached = _SYMLINK_SCAN_CACHE.get(project_id)
+        if cached is None or cached[0] != resolved or "." not in cached[1]:
+            snapshots: dict[str, _DirectorySnapshot] = {}
+            _scan_subtree(resolved, ".", snapshots)
+            _SYMLINK_SCAN_CACHE[project_id] = (resolved, snapshots)
+        else:
+            try:
+                snapshots, changed = _refresh_project_snapshot(resolved, cached[1])
+            except Exception:
+                _SYMLINK_SCAN_CACHE.pop(project_id, None)
+                raise
+            if changed:
+                _SYMLINK_SCAN_CACHE[project_id] = (resolved, snapshots)
         if not (resolved / "project.json").is_file():
-            raise ValueError("project directory is not an initialized Comic Sol project")
+            _reject("security-error: project directory is not an initialized Comic Sol project")
         return resolved
-    except (OSError, ValueError) as e:
-        raise ToolError(f"Security: {_safe_message(e)}") from None
+    except ToolError:
+        raise
+    except Exception as error:
+        raise _tool_error(error) from None
 
 
 mcp = FastMCP("Comic Sol", instructions="Deterministic Comic Sol project tools")
@@ -233,7 +296,7 @@ def comic_doctor() -> dict[str, object]:
         healthy, messages = doctor(OUTPUT_ROOT)
         return {"healthy": healthy, "messages": messages}
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -255,7 +318,7 @@ def comic_init(title: str, source_text: str, request_settings: dict[str, Any]) -
         )
         return str(project_dir.name)
     except Exception as e:
-        raise _tool_error(e)
+        raise _request_error(e) from None
 
 
 @mcp.tool()
@@ -267,7 +330,7 @@ def comic_status(project_id: str) -> dict[str, Any]:
         manifest = read_json(project_dir / "project.json")
         return manifest
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -282,7 +345,7 @@ def comic_transition(
         manifest = transition(project_dir, target, warning)
         return manifest
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 def _issue_payload(issue) -> dict[str, str]:
@@ -302,7 +365,7 @@ def comic_validate(project_id: str, stage: str = "all") -> list[dict[str, str]]:
     except ProjectValidationError as e:
         return [_issue_payload(i) for i in e.issues]
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -317,7 +380,7 @@ def comic_resume_plan(project_id: str) -> list[dict[str, str]]:
             for a in actions
         ]
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -328,7 +391,7 @@ def comic_resume(project_id: str) -> dict[str, Any]:
     try:
         return resume_project(project_dir)
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -340,7 +403,7 @@ def comic_invalidate(project_id: str, stage: str) -> list[str]:
     try:
         return invalidate_from(project_dir, stage)
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -352,7 +415,7 @@ def comic_record_stage(project_id: str, stage: str) -> dict[str, Any]:
     try:
         return record_stage(project_dir, stage)
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -371,7 +434,7 @@ def comic_record_attempt(
     try:
         return record_generation_attempt(project_dir, panel_id, kind, Path(relative_path))
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -385,7 +448,7 @@ def comic_promote_attempt(project_id: str, panel_id: str, relative_path: str) ->
         dest = promote_attempt(project_dir, panel_id, Path(relative_path))
         return str(dest.relative_to(project_dir).as_posix())
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -398,7 +461,7 @@ def comic_override_panel(project_id: str, panel_id: str, reason: str) -> str:
         record_override(project_dir, panel_id, reason)
         return f"{panel_id}: accepted with warnings"
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -410,7 +473,7 @@ def comic_letter(project_id: str) -> list[str]:
         outputs = letter_project(project_dir)
         return [str(p.relative_to(project_dir).as_posix()) for p in outputs]
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -422,7 +485,7 @@ def comic_compose(project_id: str) -> list[str]:
         outputs = compose_project(project_dir)
         return [str(p.relative_to(project_dir).as_posix()) for p in outputs]
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -434,7 +497,7 @@ def comic_export(project_id: str) -> str:
         dest = guarded_export(project_dir)
         return str(dest.relative_to(project_dir).as_posix())
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -446,7 +509,7 @@ def comic_render_report(project_id: str) -> str:
         dest = render_report(project_dir)
         return str(dest.relative_to(project_dir).as_posix())
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 @mcp.tool()
@@ -458,7 +521,7 @@ def comic_finalize(project_id: str) -> dict[str, Any]:
         from comic_sol import finalize_project
         return finalize_project(project_dir)
     except Exception as e:
-        raise _tool_error(e)
+        raise _tool_error(e) from None
 
 
 def main() -> None:
