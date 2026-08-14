@@ -936,13 +936,17 @@ def _accepted_panel_problem(
 ) -> str | None:
     # Import lazily because the standalone validator imports this lifecycle module.
     # Reuse must nevertheless honor the exact public panel-record schema.
-    from validate_project import validate_panel_record
+    from validate_project import validate_panel_provenance, validate_panel_record
 
     schema_issues = validate_panel_record(record)
     if schema_issues:
         first = schema_issues[0]
         return f"accepted panel QA record is invalid: {first.field}: {first.message}"
     if record.get("schema_version") == "2.0":
+        provenance_issues = validate_panel_provenance(project_dir, record)
+        if provenance_issues:
+            first = provenance_issues[0]
+            return f"accepted panel provenance is invalid: {first.field}: {first.message}"
         panel_id = record.get("subject_id")
         bindings = record.get("bindings")
         if not isinstance(panel_id, str) or not isinstance(bindings, dict):
@@ -1718,13 +1722,16 @@ def _stage_override(
 ) -> None:
     """Validate and stage one override. Runs under the transaction's lock."""
     record = read_json(record_path)
-    if record.get("panel_id") != panel_id:
+    is_v2 = record.get("schema_version") == "2.0"
+    record_panel_id = record.get("subject_id") if is_v2 else record.get("panel_id")
+    if record_panel_id != panel_id:
         raise ValueError("panel QA record does not match the requested panel")
-    category = record.get("failure_category")
-    if category in {"corrupt", "corrupt_image", "safety", "safety_refusal"}:
-        raise ValueError(f"{category} cannot be overridden")
-    if category != "visual_qa":
-        raise ValueError("only non-safety visual QA errors can be overridden")
+    if not is_v2:
+        category = record.get("failure_category")
+        if category in {"corrupt", "corrupt_image", "safety", "safety_refusal"}:
+            raise ValueError(f"{category} cannot be overridden")
+        if category != "visual_qa":
+            raise ValueError("only non-safety visual QA errors can be overridden")
     checks = record.get("checks")
     failed_checks = [
         check
@@ -1737,30 +1744,35 @@ def _stage_override(
         raise ValueError("override requires an error-level failed check")
     if record.get("decision") != "regenerate":
         raise ValueError("overridable visual QA errors must require regeneration")
-    raw_path = record.get("raw_path")
-    clean_path = record.get("clean_path")
-    if (
-        raw_path != f"panels/raw/{panel_id}.png"
-        or clean_path != f"panels/clean/{panel_id}.png"
-    ):
-        raise ValueError("corrupt images cannot be overridden")
-    try:
-        raw = _contained_project_path(project_dir, Path(raw_path))
-        clean = _contained_project_path(project_dir, Path(clean_path))
-        raw_size = _verify_raster(raw)
-        clean_size = _verify_raster(clean)
-        dimensions = record.get("dimensions")
-        recorded_size = (
-            dimensions.get("width"), dimensions.get("height")
-        ) if isinstance(dimensions, dict) else None
+    if is_v2:
+        problem = _accepted_panel_problem(project_dir, record)
+        if problem is not None:
+            raise ValueError(f"panel artifacts cannot be overridden: {problem}")
+    else:
+        raw_path = record.get("raw_path")
+        clean_path = record.get("clean_path")
         if (
-            record.get("raw_sha256") != sha256_file(raw)
-            or recorded_size != raw_size
-            or clean_size != raw_size
+            raw_path != f"panels/raw/{panel_id}.png"
+            or clean_path != f"panels/clean/{panel_id}.png"
         ):
-            raise ValueError("recorded panel artifacts do not match")
-    except (OSError, ValueError) as error:
-        raise ValueError("corrupt images cannot be overridden") from error
+            raise ValueError("corrupt images cannot be overridden")
+        try:
+            raw = _contained_project_path(project_dir, Path(raw_path))
+            clean = _contained_project_path(project_dir, Path(clean_path))
+            raw_size = _verify_raster(raw)
+            clean_size = _verify_raster(clean)
+            dimensions = record.get("dimensions")
+            recorded_size = (
+                dimensions.get("width"), dimensions.get("height")
+            ) if isinstance(dimensions, dict) else None
+            if (
+                record.get("raw_sha256") != sha256_file(raw)
+                or recorded_size != raw_size
+                or clean_size != raw_size
+            ):
+                raise ValueError("recorded panel artifacts do not match")
+        except (OSError, ValueError) as error:
+            raise ValueError("corrupt images cannot be overridden") from error
     warnings = record.get("unresolved_warnings")
     if not isinstance(warnings, list):
         raise ValueError("panel unresolved_warnings must be an array")
@@ -1774,8 +1786,9 @@ def _stage_override(
         warnings.append(normalized_reason)
     for check in failed_checks:
         check["severity"] = "warning"
-    record["decision"] = "accept_with_warnings"
-    record["retry_reason"] = None
+    record["decision"] = "accept-warning" if is_v2 else "accept_with_warnings"
+    if not is_v2:
+        record["retry_reason"] = None
     record["override_reason"] = normalized_reason
 
     if normalized_reason not in manifest_warnings:
@@ -1786,7 +1799,11 @@ def _stage_override(
     tx.stage_bytes("project.json", canonical_artifact_bytes(manifest))
     tx.stage_bytes(
         "logs/events.jsonl",
-        _event_log_with(project_dir, "panel.overridden", {"panel_id": panel_id, "action": "accepted"}),
+        _event_log_with(
+            project_dir,
+            "panel.overridden",
+            {"panel_id": panel_id, "action": "accepted"},
+        ),
     )
 
 
