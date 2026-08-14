@@ -1109,12 +1109,36 @@ class PackagingTests(unittest.TestCase):
         readme = self.readme()
         for required in (
             "Pillow==12.3.0",
-            "python3.11 -m unittest discover -s tests -v",
-            "python3.11 scripts/comic_sol.py doctor",
+            '"$PYTHON" -m unittest discover -s tests -v',
+            '"$PYTHON" scripts/comic_sol.py doctor',
             "One natural-language",
         ):
             self.assertIn(required, readme)
         self.assertNotRegex(readme.lower(), r"npm run|start the server|docker compose")
+
+    def test_runtime_instructions_use_active_python_not_a_fixed_minor_version(self):
+        documents = (
+            ROOT / "SKILL.md",
+            ROOT / "skills/comic-sol/SKILL.md",
+            ROOT / "README.md",
+            ROOT / "CONTRIBUTING.md",
+            ROOT / "SUPPORT.md",
+            ROOT / "references/workflow.md",
+            ROOT / "skills/comic-sol/references/workflow.md",
+            ROOT / "references/image-provider-setup.md",
+        )
+        fixed_minor = re.compile(r"(?i)\b(?:python3?\.\d+|py\s+-3\.\d+)\b")
+        for launcher in ("python3.11", "python3.12", "py -3.11"):
+            self.assertIsNotNone(fixed_minor.search(launcher), launcher)
+        for path in documents:
+            text = path.read_text("utf-8")
+            self.assertFalse(fixed_minor.search(text), path)
+
+        for path in (ROOT / "SKILL.md", ROOT / "skills/comic-sol/SKILL.md"):
+            self.assertIn("`PYTHON`", path.read_text("utf-8"), path)
+        self.assertIn("$PYTHON", (ROOT / "README.md").read_text("utf-8"))
+        self.assertIn("Python 3.11+", (ROOT / "README.md").read_text("utf-8"))
+        self.assertIn("Python 3.11+", (ROOT / "SKILL.md").read_text("utf-8"))
 
     def test_public_surface_uses_the_canonical_independent_repository(self):
         readme = self.readme()
@@ -1147,7 +1171,7 @@ class PackagingTests(unittest.TestCase):
             ("License", "https://img.shields.io/github/license/wenn-id/comicsol", "LICENSE"),
             (
                 "Python",
-                "https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white",
+                "https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white",
                 "https://www.python.org/",
             ),
             ("MCP tools", "https://img.shields.io/badge/MCP_tools-17-brightgreen", "#mcp-server-optional"),
