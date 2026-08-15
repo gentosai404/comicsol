@@ -40,6 +40,34 @@ def _backup_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.bak-{stamp}")
 
 
+def _resolve_executable(executable: str | os.PathLike[str] | None) -> str:
+    launcher = os.fspath(
+        executable
+        if executable is not None
+        else (sys.executable if getattr(sys, "frozen", False) else sys.argv[0])
+    )
+    candidate = Path(launcher).expanduser()
+    if candidate.is_absolute():
+        located = str(candidate) if candidate.is_file() else None
+        if located is None and os.name == "nt":
+            pathext = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
+            for extension in filter(None, pathext.split(os.pathsep)):
+                extended = candidate.with_name(candidate.name + extension)
+                if extended.is_file():
+                    located = str(extended)
+                    break
+    else:
+        located = shutil.which(launcher)
+    if located is None:
+        raise FileNotFoundError("Comic Sol executable could not be resolved")
+    resolved = Path(located).expanduser().resolve(strict=True)
+    if not resolved.is_file() or (
+        os.name != "nt" and not os.access(resolved, os.X_OK)
+    ):
+        raise FileNotFoundError("Comic Sol executable is not runnable")
+    return str(resolved)
+
+
 def _atomic_write(path: Path, data: bytes, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -69,21 +97,27 @@ def default_adapters(home: Path | None = None) -> list[ClientAdapter]:
 
     if sys.platform == "win32":
         roaming = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
-        adapters.extend(
-            [
-                JsonClientAdapter("claude-desktop", roaming / "Claude" / "claude_desktop_config.json"),
-                JsonClientAdapter("cursor", home / ".cursor" / "mcp.json"),
-                JsonClientAdapter("windsurf", home / ".codeium" / "windsurf" / "mcp_config.json"),
-            ]
+        claude = roaming / "Claude" / "claude_desktop_config.json"
+    elif sys.platform == "darwin":
+        claude = (
+            home
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
         )
     else:
-        adapters.extend(
-            [
-                JsonClientAdapter("claude-desktop", home / ".config" / "Claude" / "claude_desktop_config.json"),
-                JsonClientAdapter("cursor", home / ".cursor" / "mcp.json"),
-                JsonClientAdapter("windsurf", home / ".codeium" / "windsurf" / "mcp_config.json"),
-            ]
-        )
+        claude = home / ".config" / "Claude" / "claude_desktop_config.json"
+
+    adapters.extend(
+        [
+            JsonClientAdapter("claude-desktop", claude),
+            JsonClientAdapter("cursor", home / ".cursor" / "mcp.json"),
+            JsonClientAdapter(
+                "windsurf", home / ".codeium" / "windsurf" / "mcp_config.json"
+            ),
+        ]
+    )
     return adapters
 
 
@@ -128,18 +162,30 @@ def setup_clients(
     home: Path | None = None,
     *,
     adapters: Iterable[ClientAdapter] | None = None,
-    executable: str = "comic-sol",
+    executable: str | os.PathLike[str] | None = None,
 ) -> list[SetupResult]:
     output_root = Path(output_root).expanduser().resolve()
     chosen = set(selected or ())
     using_defaults = adapters is None
     candidates = list(adapters if adapters is not None else default_adapters(home))
-    entry = mcp_entry(executable, output_root)
+    entry: dict[str, object] | None = None
     results: list[SetupResult] = []
     for adapter in candidates:
         if chosen and adapter.name not in chosen:
             results.append(SetupResult(adapter.name, "skipped", str(adapter.config_path), None, "not selected"))
+        elif not adapter.detect():
+            results.append(
+                SetupResult(
+                    adapter.name,
+                    "skipped",
+                    str(adapter.config_path),
+                    None,
+                    "client config not found",
+                )
+            )
         else:
+            if entry is None:
+                entry = mcp_entry(_resolve_executable(executable), output_root)
             results.append(_configure_one(adapter, entry, remove=False))
     if using_defaults:
         present = {adapter.name for adapter in candidates}

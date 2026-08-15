@@ -1,13 +1,16 @@
+import contextlib
 import json
 import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import comic_sol_product.setup as client_setup
 from comic_sol_product import cli
 from comic_sol_product.clients import CodexAdapter, JsonClientAdapter
-from comic_sol_product.setup import setup_clients, uninstall_clients
+from comic_sol_product.setup import repair_clients, setup_clients, uninstall_clients
 
 
 class ClientSetupTests(unittest.TestCase):
@@ -18,6 +21,50 @@ class ClientSetupTests(unittest.TestCase):
         self.output = self.home / "Comic Sol Projects"
         self.output.mkdir(parents=True)
         (self.output / "keep.txt").write_text("project", encoding="utf-8")
+        self.launcher = self.home / "bin with spaces" / (
+            "comic-sol.exe" if os.name == "nt" else "comic-sol"
+        )
+        self.launcher.parent.mkdir()
+        self.launcher.write_bytes(b"launcher")
+        if os.name != "nt":
+            self.launcher.chmod(0o755)
+
+    def adapter_paths(self, platform: str) -> dict[str, Path]:
+        with mock.patch.object(client_setup.sys, "platform", platform):
+            return {
+                adapter.name: adapter.config_path
+                for adapter in client_setup.default_adapters(self.home)
+            }
+
+    def test_default_adapter_paths_are_platform_native(self):
+        with mock.patch.dict(
+            os.environ, {"APPDATA": str(self.home / "Roaming")}
+        ):
+            windows = self.adapter_paths("win32")
+        macos = self.adapter_paths("darwin")
+        linux = self.adapter_paths("linux")
+
+        self.assertEqual(
+            self.home / "Roaming/Claude/claude_desktop_config.json",
+            windows["claude-desktop"],
+        )
+        self.assertEqual(
+            self.home
+            / "Library/Application Support/Claude/claude_desktop_config.json",
+            macos["claude-desktop"],
+        )
+        self.assertEqual(
+            self.home / ".config/Claude/claude_desktop_config.json",
+            linux["claude-desktop"],
+        )
+        shared = {
+            "codex": self.home / ".codex/config.toml",
+            "cursor": self.home / ".cursor/mcp.json",
+            "windsurf": self.home / ".codeium/windsurf/mcp_config.json",
+        }
+        for paths in (windows, macos, linux):
+            for name, expected in shared.items():
+                self.assertEqual(expected, paths[name])
 
     def test_json_setup_creates_backup_and_exact_entry(self):
         config = self.home / ".cursor" / "mcp.json"
@@ -30,7 +77,7 @@ class ClientSetupTests(unittest.TestCase):
             self.output,
             home=self.home,
             adapters=[adapter],
-            executable="/opt/comic-sol/bin/comic-sol",
+            executable=self.launcher,
         )[0]
 
         self.assertEqual(result.status, "configured")
@@ -41,7 +88,7 @@ class ClientSetupTests(unittest.TestCase):
         self.assertEqual(
             saved["mcpServers"]["comic-sol"],
             {
-                "command": "/opt/comic-sol/bin/comic-sol",
+                "command": str(self.launcher.resolve()),
                 "args": ["mcp", "--root", str(self.output.resolve())],
             },
         )
@@ -51,9 +98,9 @@ class ClientSetupTests(unittest.TestCase):
         config.parent.mkdir(parents=True)
         config.write_text("{}\n", encoding="utf-8")
         adapter = JsonClientAdapter("cursor", config, "mcpServers")
-        first = setup_clients(self.output, adapters=[adapter], executable="comic-sol")[0]
+        first = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
         first_bytes = config.read_bytes()
-        second = setup_clients(self.output, adapters=[adapter], executable="comic-sol")[0]
+        second = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
 
         self.assertEqual(first.status, "configured")
         self.assertEqual(second.status, "unchanged")
@@ -69,7 +116,7 @@ class ClientSetupTests(unittest.TestCase):
         config.write_bytes(original)
         adapter = JsonClientAdapter("cursor", config, "mcpServers")
 
-        result = setup_clients(self.output, adapters=[adapter])[0]
+        result = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(config.read_bytes(), original)
@@ -83,7 +130,7 @@ class ClientSetupTests(unittest.TestCase):
         config.write_bytes(original)
         adapter = JsonClientAdapter("cursor", config, "mcpServers", verify_hook=lambda: False)
 
-        result = setup_clients(self.output, adapters=[adapter])[0]
+        result = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
 
         self.assertEqual(result.status, "rolled-back")
         self.assertEqual(config.read_bytes(), original)
@@ -103,6 +150,7 @@ class ClientSetupTests(unittest.TestCase):
         result = setup_clients(
             self.output,
             adapters=[JsonClientAdapter("cursor", config, "mcpServers")],
+            executable=self.launcher,
         )[0]
 
         self.assertEqual("configured", result.status)
@@ -132,7 +180,7 @@ class ClientSetupTests(unittest.TestCase):
             verify_hook=lambda: False,
         )
 
-        result = setup_clients(self.output, adapters=[adapter])[0]
+        result = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
 
         self.assertEqual("rolled-back", result.status)
         self.assertEqual(original, config.read_bytes())
@@ -154,6 +202,7 @@ class ClientSetupTests(unittest.TestCase):
         result = setup_clients(
             self.output,
             adapters=[JsonClientAdapter("cursor", config, "mcpServers")],
+            executable=self.launcher,
         )[0]
 
         self.assertEqual(0o640, stat.S_IMODE(config.stat().st_mode))
@@ -175,7 +224,7 @@ class ClientSetupTests(unittest.TestCase):
             verify_hook=lambda: False,
         )
 
-        result = setup_clients(self.output, adapters=[adapter])[0]
+        result = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
 
         self.assertEqual("rolled-back", result.status)
         self.assertEqual(0o640, stat.S_IMODE(config.stat().st_mode))
@@ -254,8 +303,8 @@ class ClientSetupTests(unittest.TestCase):
         config.write_text('model = "gpt-test"\n\n[mcp_servers.other]\ncommand = "other"\n', encoding="utf-8")
         adapter = CodexAdapter(config)
 
-        first = setup_clients(self.output, adapters=[adapter], executable="comic-sol")[0]
-        second = setup_clients(self.output, adapters=[adapter], executable="comic-sol")[0]
+        first = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
+        second = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
         text = config.read_text(encoding="utf-8")
 
         self.assertEqual(first.status, "configured")
@@ -270,7 +319,7 @@ class ClientSetupTests(unittest.TestCase):
         config.parent.mkdir(parents=True)
         config.write_text('{"mcpServers":{"other":{"command":"other"}}}\n', encoding="utf-8")
         adapter = JsonClientAdapter("cursor", config, "mcpServers")
-        setup_clients(self.output, adapters=[adapter])
+        setup_clients(self.output, adapters=[adapter], executable=self.launcher)
 
         result = uninstall_clients(self.output, adapters=[adapter])[0]
         saved = json.loads(config.read_text(encoding="utf-8"))
@@ -283,9 +332,110 @@ class ClientSetupTests(unittest.TestCase):
     def test_missing_config_is_reported_skipped_without_creation(self):
         config = self.home / ".cursor" / "mcp.json"
         adapter = JsonClientAdapter("cursor", config, "mcpServers")
-        result = setup_clients(self.output, adapters=[adapter])[0]
+        result = setup_clients(self.output, adapters=[adapter], executable=self.launcher)[0]
         self.assertEqual(result.status, "skipped")
         self.assertFalse(config.exists())
+
+    def test_missing_config_skips_before_launcher_resolution(self):
+        config = self.home / ".cursor" / "mcp.json"
+        adapter = JsonClientAdapter("cursor", config, "mcpServers")
+
+        with mock.patch(
+            "comic_sol_product.setup.shutil.which", return_value=None
+        ) as which:
+            result = setup_clients(
+                self.output,
+                adapters=[adapter],
+                executable="missing-comic-sol",
+            )[0]
+
+        self.assertEqual("skipped", result.status)
+        which.assert_not_called()
+
+    def test_setup_resolves_bare_launcher_and_repair_is_idempotent(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "comic-sol": {
+                            "command": "comic-sol",
+                            "args": ["mcp", "--root", str(self.output.resolve())],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        adapter = JsonClientAdapter("cursor", config, "mcpServers")
+
+        with mock.patch(
+            "comic_sol_product.setup.shutil.which", return_value=str(self.launcher)
+        ):
+            repaired = repair_clients(
+                self.output, adapters=[adapter], executable="comic-sol"
+            )[0]
+            repaired_bytes = config.read_bytes()
+            repeated = repair_clients(
+                self.output, adapters=[adapter], executable="comic-sol"
+            )[0]
+
+        entry = json.loads(config.read_text(encoding="utf-8"))["mcpServers"][
+            "comic-sol"
+        ]
+        self.assertEqual("configured", repaired.status)
+        self.assertEqual("unchanged", repeated.status)
+        self.assertEqual(str(self.launcher.resolve()), entry["command"])
+        self.assertEqual(
+            ["mcp", "--root", str(self.output.resolve())], entry["args"]
+        )
+        self.assertEqual(repaired_bytes, config.read_bytes())
+
+    def test_unresolvable_launcher_fails_before_config_mutation(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        original = b"{}\n"
+        config.write_bytes(original)
+        adapter = JsonClientAdapter("cursor", config, "mcpServers")
+
+        with mock.patch("comic_sol_product.setup.shutil.which", return_value=None):
+            with self.assertRaises(FileNotFoundError):
+                setup_clients(
+                    self.output,
+                    adapters=[adapter],
+                    executable="missing-comic-sol",
+                )
+
+        self.assertEqual(original, config.read_bytes())
+        self.assertEqual([], list(config.parent.glob("*.bak-*")))
+
+    @unittest.skipUnless(os.name == "nt", "Windows launcher semantics")
+    def test_absolute_console_stub_ignores_a_cwd_decoy(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("{}\n", encoding="utf-8")
+        adapter = JsonClientAdapter("cursor", config, "mcpServers")
+        console_path = self.home / "console stub" / "comic-sol"
+        console_path.parent.mkdir()
+        native_launcher = console_path.with_suffix(".exe")
+        native_launcher.write_bytes(b"native launcher")
+        decoy_directory = self.home / "decoy"
+        decoy_directory.mkdir()
+        (decoy_directory / "comic-sol.exe").write_bytes(b"decoy launcher")
+
+        with contextlib.chdir(decoy_directory):
+            result = setup_clients(
+                self.output,
+                adapters=[adapter],
+                executable=console_path,
+            )[0]
+
+        entry = json.loads(config.read_text(encoding="utf-8"))["mcpServers"][
+            "comic-sol"
+        ]
+        self.assertEqual("configured", result.status)
+        self.assertEqual(str(native_launcher.resolve()), entry["command"])
 
     def test_cli_exposes_transaction_commands(self):
         parser = cli.build_parser()

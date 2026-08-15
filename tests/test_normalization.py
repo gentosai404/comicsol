@@ -1,5 +1,6 @@
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -9,19 +10,20 @@ from unittest import mock
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
 
-from normalize_panels import (  # noqa: E402
+from scripts.normalize_panels import (  # noqa: E402
     NormalizationSpec,
     normalization_geometry,
     normalize_panel,
     normalize_panels,
 )
-from validate_project import validate_panel_provenance  # noqa: E402
-import letter_panels  # noqa: E402
-import pdf_quality  # noqa: E402
-import raster_limits  # noqa: E402
-import normalize_panels as normalize_panels_module  # noqa: E402
+from scripts.validate_project import validate_panel_provenance  # noqa: E402
+from scripts import (  # noqa: E402
+    letter_panels,
+    normalize_panels as normalize_panels_module,
+    pdf_quality,
+    raster_limits,
+)
 
 
 def sha256(path: Path) -> str:
@@ -29,6 +31,18 @@ def sha256(path: Path) -> str:
 
 
 class NormalizationGeometryTests(unittest.TestCase):
+    def test_direct_script_bootstraps_package_context(self):
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "normalize_panels.py")],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
     def test_raster_modules_share_one_decode_ceiling(self):
         self.assertEqual(raster_limits.MAX_DECODED_PIXELS, normalize_panels_module.MAX_DECODED_PIXELS)
         self.assertEqual(raster_limits.MAX_DECODED_PIXELS, letter_panels.MAX_DECODED_PIXELS)
@@ -267,7 +281,7 @@ class PanelProvenanceTests(unittest.TestCase):
         )
 
     def test_provenance_rejects_raster_over_decode_limit_before_loading(self):
-        with mock.patch("validate_project.MAX_DECODED_PIXELS", 1):
+        with mock.patch("scripts.validate_project.MAX_DECODED_PIXELS", 1):
             issues = validate_panel_provenance(self.project, self.record)
 
         self.assert_stale(issues, "raw_path")
@@ -277,7 +291,7 @@ class PanelProvenanceTests(unittest.TestCase):
 
     def test_provenance_promotes_decompression_bomb_warning_to_stale_issue(self):
         with mock.patch(
-            "validate_project.Image.Image.load",
+            "scripts.validate_project.Image.Image.load",
             side_effect=Image.DecompressionBombWarning("unsafe dimensions"),
         ):
             issues = validate_panel_provenance(self.project, self.record)
