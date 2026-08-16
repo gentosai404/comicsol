@@ -3,6 +3,7 @@ import json
 import os
 import stat
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -339,6 +340,216 @@ class ClientSetupTests(unittest.TestCase):
         self.assertNotIn("comic-sol", saved["mcpServers"])
         self.assertEqual(saved["mcpServers"]["other"], {"command": "other"})
         self.assertEqual((self.output / "keep.txt").read_text(encoding="utf-8"), "project")
+
+    def test_codex_uninstall_ignores_section_like_text_in_multiline_string(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = (
+            '[other]\n'
+            'note = """\n'
+            '[mcp_servers.comic-sol]\n'
+            '"""\n\n'
+            '[kept_server]\n'
+            'command = "important-user-server"\n'
+        ).encode("utf-8")
+        config.write_bytes(original)
+        adapter = CodexAdapter(config)
+
+        result = uninstall_clients(self.output, adapters=[adapter])[0]
+
+        self.assertEqual(result.status, "not-configured")
+        self.assertEqual(config.read_bytes(), original)
+        self.assertIsNone(result.backup_path)
+        self.assertEqual(
+            "important-user-server",
+            tomllib.loads(config.read_text(encoding="utf-8"))["kept_server"]["command"],
+        )
+
+    def test_codex_uninstall_removes_last_section_and_keeps_document_valid(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'model = "gpt-test"\n\n'
+            '[mcp_servers.comic-sol]\n'
+            'command = "comic-sol"\n'
+            'args = ["mcp", "--root", "/tmp/comic-sol"]\n',
+            encoding="utf-8",
+        )
+        adapter = CodexAdapter(config)
+
+        result = uninstall_clients(self.output, adapters=[adapter])[0]
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "removed")
+        self.assertEqual(parsed, {"model": "gpt-test"})
+
+    def test_codex_uninstall_preserves_trailing_comments_after_last_section(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            '[mcp_servers.comic-sol]\n'
+            'command = "comic-sol"\n'
+            'args = ["mcp", "--root", "/tmp/comic-sol"]\n\n'
+            '# user note after integration\n',
+            encoding="utf-8",
+        )
+        adapter = CodexAdapter(config)
+
+        result = uninstall_clients(self.output, adapters=[adapter])[0]
+        saved = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.status, "removed")
+        self.assertIn("# user note after integration", saved)
+        self.assertEqual(tomllib.loads(saved), {})
+
+    def test_codex_uninstall_removes_quoted_key_section(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'model = "gpt-test"\n\n'
+            '[mcp_servers."comic-sol"]\n'
+            'command = "comic-sol"\n'
+            'args = ["mcp", "--root", "/tmp/comic-sol"]\n',
+            encoding="utf-8",
+        )
+        adapter = CodexAdapter(config)
+
+        result = uninstall_clients(self.output, adapters=[adapter])[0]
+
+        self.assertEqual(result.status, "removed")
+        self.assertEqual(
+            tomllib.loads(config.read_text(encoding="utf-8")),
+            {"model": "gpt-test"},
+        )
+
+    def test_codex_uninstall_removes_whitespace_and_quoted_dotted_key_sections(self):
+        for header in (
+            '[mcp_servers . "comic-sol"]',
+            '["mcp_servers"."comic-sol"]',
+        ):
+            with self.subTest(header=header):
+                config = self.home / ".codex" / "config.toml"
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text(
+                    'model = "gpt-test"\n\n'
+                    f"{header}\n"
+                    'command = "comic-sol"\n'
+                    'args = ["mcp", "--root", "/tmp/comic-sol"]\n',
+                    encoding="utf-8",
+                )
+                result = uninstall_clients(self.output, adapters=[CodexAdapter(config)])[0]
+
+                self.assertEqual(result.status, "removed")
+                self.assertEqual(
+                    tomllib.loads(config.read_text(encoding="utf-8")),
+                    {"model": "gpt-test"},
+                )
+
+    def test_uninstall_verification_failure_rolls_back_byte_for_byte(self):
+        config = self.home / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"mcpServers":{"other":{"command":"other"}}}\n', encoding="utf-8")
+        setup_adapter = JsonClientAdapter("cursor", config, "mcpServers")
+        setup_clients(self.output, adapters=[setup_adapter], executable=self.launcher)
+        original = config.read_bytes()
+        uninstall_adapter = JsonClientAdapter(
+            "cursor", config, "mcpServers", verify_hook=lambda: False
+        )
+
+        result = uninstall_clients(self.output, adapters=[uninstall_adapter])[0]
+
+        self.assertEqual(result.status, "rolled-back")
+        self.assertEqual(config.read_bytes(), original)
+        self.assertIsNotNone(result.backup_path)
+
+    def test_uninstall_rolls_back_when_written_toml_is_malformed(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = (
+            '[mcp_servers.comic-sol]\n'
+            'command = "comic-sol"\n'
+            'args = ["mcp", "--root", "/tmp/comic-sol"]\n'
+        ).encode("utf-8")
+        config.write_bytes(original)
+        adapter = CodexAdapter(config)
+
+        with mock.patch.object(adapter, "dump", return_value=b"[broken\n"):
+            result = uninstall_clients(self.output, adapters=[adapter])[0]
+
+        self.assertEqual(result.status, "rolled-back")
+        self.assertEqual(config.read_bytes(), original)
+        self.assertIsNotNone(result.backup_path)
+
+    def test_custom_adapter_without_removed_verifier_is_supported(self):
+        class CustomAdapter:
+            name = "custom"
+
+            def __init__(self, path):
+                self.config_path = path
+
+            def detect(self):
+                return self.config_path.is_file()
+
+            def load(self, raw):
+                return raw.decode("utf-8")
+
+            def mutate(self, config, entry):
+                return config + "comic-sol\n", True
+
+            def remove(self, config):
+                marker = "comic-sol\n"
+                if not config.endswith(marker):
+                    return config, False
+                return config[:-len(marker)], True
+
+            def dump(self, config):
+                return config.encode("utf-8")
+
+            def verify(self, expected=None):
+                return True
+
+        config = self.home / "custom.conf"
+        config.write_bytes(b"existing\ncomic-sol\n")
+
+        result = uninstall_clients(self.output, adapters=[CustomAdapter(config)])[0]
+
+        self.assertEqual(result.status, "removed")
+        self.assertEqual(config.read_text(encoding="utf-8"), "existing\n")
+
+    def test_uninstall_rolls_back_when_custom_adapter_load_raises(self):
+        class RaisingAdapter:
+            name = "raising"
+
+            def __init__(self, path):
+                self.config_path = path
+
+            def detect(self):
+                return True
+
+            def load(self, raw):
+                if raw == b"original\n":
+                    return raw
+                raise TypeError("post-write validation failed")
+
+            def mutate(self, config, entry):
+                return config, False
+
+            def remove(self, config):
+                return b"changed\n", True
+
+            def dump(self, config):
+                return config
+
+            def verify(self, expected=None):
+                return True
+
+        config = self.home / "raising.conf"
+        config.write_bytes(b"original\n")
+
+        result = uninstall_clients(self.output, adapters=[RaisingAdapter(config)])[0]
+
+        self.assertEqual(result.status, "rolled-back")
+        self.assertEqual(config.read_bytes(), b"original\n")
 
     def test_missing_config_is_reported_skipped_without_creation(self):
         config = self.home / ".cursor" / "mcp.json"
