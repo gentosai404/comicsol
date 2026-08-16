@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,7 @@ MAX_SOURCE_BYTES = 200 * 1024
 SOURCE_SUFFIXES = {".txt", ".md"}
 _DRIVE = re.compile(r"^[A-Za-z]:")
 _LOCK_RETRY_SECONDS = 0.05
+PROJECT_OPERATION_LOCK_TIMEOUT = 300.0
 # Windows byte-range locks are mandatory, so the locked byte must sit past any
 # region readers touch. The PID metadata occupies the first bytes of the file.
 _LOCK_BYTE_OFFSET = 4096
@@ -29,15 +31,35 @@ _REPARSE_POINT = 0x400
 class ProjectLock:
     """Cross-process advisory lock retained at ``.comic-sol.lock``."""
 
-    def __init__(self, project_dir: Path, timeout: float = 10.0):
+    _thread_state = threading.local()
+
+    def __init__(self, project_dir: Path, timeout: float | None = 10.0):
         """Initialize lock state for a project directory."""
         self.project_dir = Path(project_dir)
         self.timeout = timeout
         self._handle: BinaryIO | None = None
+        self._lock_key: Path | None = None
+        self._acquisition_depth = 0
+
+    @classmethod
+    def _held_locks(cls) -> dict[Path, tuple[BinaryIO, int]]:
+        held = getattr(cls._thread_state, "held", None)
+        if held is None:
+            held = {}
+            cls._thread_state.held = held
+        return held
 
     def __enter__(self) -> "ProjectLock":
         """Acquire the project lock and return it."""
-        deadline = time.monotonic() + self.timeout
+        key = self.project_dir.resolve()
+        held = self._held_locks()
+        existing = held.get(key)
+        if existing is not None:
+            held[key] = (existing[0], existing[1] + 1)
+            self._lock_key = key
+            self._acquisition_depth += 1
+            return self
+        deadline = None if self.timeout is None else time.monotonic() + self.timeout
         path = self.project_dir / ".comic-sol.lock"
         try:
             descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
@@ -67,7 +89,7 @@ class ProjectLock:
                     except OSError as error:
                         if not self._retryable(error):
                             raise
-                    if time.monotonic() >= deadline:
+                    if deadline is not None and time.monotonic() >= deadline:
                         raise TimeoutError(
                             "project is locked by another process"
                         )
@@ -79,16 +101,23 @@ class ProjectLock:
                     except OSError as error:
                         if not self._retryable(error):
                             raise
-                        if time.monotonic() >= deadline:
+                        if deadline is not None and time.monotonic() >= deadline:
                             raise TimeoutError(
                                 "project is locked by another process"
                             ) from error
-                remaining = max(0.0, deadline - time.monotonic())
+                if deadline is None:
+                    remaining = _LOCK_RETRY_SECONDS
+                else:
+                    remaining = max(0.0, deadline - time.monotonic())
                 time.sleep(min(_LOCK_RETRY_SECONDS, remaining))
             handle.seek(0)
             handle.truncate()
             handle.write(f"{os.getpid()}\n".encode("ascii"))
             handle.flush()
+            held[key] = (handle, 1)
+            self._handle = handle
+            self._lock_key = key
+            self._acquisition_depth = 1
             return self
         except BaseException:
             try:
@@ -154,10 +183,27 @@ class ProjectLock:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         """Release the project lock when leaving its context."""
-        handle = self._handle
-        self._handle = None
-        if handle is None:
+        if self._lock_key is None or self._acquisition_depth == 0:
             return
+        held = self._held_locks()
+        existing = held.get(self._lock_key)
+        if existing is None:
+            self._handle = None
+            self._lock_key = None
+            self._acquisition_depth = 0
+            return
+        handle, depth = existing
+        key = self._lock_key
+        self._acquisition_depth -= 1
+        if depth > 1:
+            held[key] = (handle, depth - 1)
+            if self._acquisition_depth == 0:
+                self._handle = None
+                self._lock_key = None
+            return
+        del held[key]
+        self._handle = None
+        self._lock_key = None
         try:
             self._unlock(handle)
         finally:
@@ -432,10 +478,17 @@ class ProjectTransaction:
 
     JOURNAL_SCHEMA_VERSION = "1.0"
 
-    def __init__(self, project_dir: Path, operation: str) -> None:
+    def __init__(
+        self,
+        project_dir: Path,
+        operation: str,
+        *,
+        lock_timeout: float | None = PROJECT_OPERATION_LOCK_TIMEOUT,
+    ) -> None:
         """Initialize an unpublished project transaction."""
         self.project_dir = Path(project_dir)
         self.operation = operation
+        self.lock_timeout = lock_timeout
         self._lock: ProjectLock | None = None
         self._dir: Path | None = None
         self._journal: list[dict] = []
@@ -444,7 +497,9 @@ class ProjectTransaction:
 
     def __enter__(self) -> "ProjectTransaction":
         """Start a transaction while holding the project lock."""
-        self._lock = ProjectLock(self.project_dir).__enter__()
+        self._lock = ProjectLock(
+            self.project_dir, timeout=self.lock_timeout
+        ).__enter__()
         try:
             base = contained_project_path(self.project_dir, "logs/transactions")
             base.mkdir(parents=True, exist_ok=True)
