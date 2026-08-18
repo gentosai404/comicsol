@@ -78,9 +78,10 @@ class PublicInstallerContractTests(unittest.TestCase):
     @staticmethod
     def write_marker(install_root, marker_root=None):
         version = "2.0.0rc4"
+        encoded_root = (marker_root or install_root.resolve()).as_posix().encode().hex()
         (install_root / "active-version").write_text(f"{version}\n", encoding="utf-8")
         (install_root / ".comic-sol-install").write_text(
-            f"comic-sol-install-v1\n{version}\n{marker_root or install_root.resolve()}\n",
+            f"comic-sol-install-v1\n{version}\n{encoded_root}\n",
             encoding="utf-8",
         )
 
@@ -196,6 +197,7 @@ class PublicInstallerContractTests(unittest.TestCase):
             self.assertIn("active-version", script)
             self.assertIn("unsigned", script.lower())
             self.assertNotIn("Comic Sol Projects", script)
+        self.assertIn("command -v perl", self.posix)
         self.assertIn("sha256sum", self.posix)
         self.assertNotIn("python", self.posix.lower())
         self.assertIn("validate_zip", self.posix)
@@ -332,6 +334,67 @@ class PublicInstallerContractTests(unittest.TestCase):
             self.assertFalse((install_root / ".comic-sol-install").exists())
             self.assertFalse((install_root / "bin").exists())
 
+    @unittest.skipUnless(os.name != "nt", "POSIX installer test")
+    def test_posix_rejects_symlinked_install_root(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self.write_runtime_archive(root)
+            target = root / "target"
+            target.mkdir()
+            install_root = root / "install-root"
+            install_root.symlink_to(target, target_is_directory=True)
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(self.root / "installers/install.sh"),
+                    "--archive",
+                    str(archive),
+                    "--sha256",
+                    hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    "--install-root",
+                    str(install_root),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("symlink", result.stderr.lower())
+            self.assertFalse((target / ".comic-sol-install").exists())
+            self.assertFalse((target / "bin").exists())
+
+    @unittest.skipUnless(os.name != "nt", "POSIX installer test")
+    def test_posix_rejects_symlinked_install_ancestor(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self.write_runtime_archive(root)
+            target_parent = root / "target-parent"
+            target_parent.mkdir()
+            symlink_parent = root / "symlink-parent"
+            symlink_parent.symlink_to(target_parent, target_is_directory=True)
+            install_root = symlink_parent / "runtime"
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(self.root / "installers/install.sh"),
+                    "--archive",
+                    str(archive),
+                    "--sha256",
+                    hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    "--install-root",
+                    str(install_root),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("symlink", result.stderr.lower())
+            self.assertFalse((target_parent / "runtime" / ".comic-sol-install").exists())
+            self.assertFalse((target_parent / "runtime" / "bin").exists())
+
     def test_installers_serialize_install_root_mutations(self):
         self.assertIn("INSTALL_LOCK_DIR", self.posix)
         self.assertIn("mkdir --", self.posix)
@@ -344,7 +407,11 @@ class PublicInstallerContractTests(unittest.TestCase):
     def test_installers_canonicalize_or_reject_aliases_before_locking(self):
         self.assertLess(
             self.posix.index('INSTALL_ROOT=$(canonical_install_root "$INSTALL_ROOT")'),
-            self.posix.index('INSTALL_LOCK_DIR="${INSTALL_ROOT}.lock"'),
+            self.posix.index('INSTALL_LOCK_DIR="$(dirname -- "$INSTALL_ROOT_DISPLAY")/.comic-sol-install.lock"'),
+        )
+        self.assertLess(
+            self.posix.index('rmdir -- "$install_root_name"'),
+            self.posix.index('release_install_lock\n  echo "Comic Sol runtime removed'),
         )
         self.assertLess(
             self.powershell.index("$InstallRoot = Resolve-CanonicalInstallRoot -Path $InstallRoot"),
@@ -418,6 +485,39 @@ class PublicInstallerContractTests(unittest.TestCase):
             ):
                 self.assertFalse((install_root / name).exists(), name)
 
+    @unittest.skipUnless(os.name != "nt", "POSIX installer test")
+    def test_posix_relative_archive_persists_display_root_and_uninstalls_root(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self.write_runtime_archive(root)
+            install_root = root / "runtime"
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(self.root / "installers/install.sh"),
+                    "--archive",
+                    archive.name,
+                    "--sha256",
+                    digest,
+                    "--install-root",
+                    install_root.name,
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            marker_lines = (install_root / ".comic-sol-install").read_text("utf-8").splitlines()
+            self.assertEqual(str(install_root.resolve()).encode().hex(), marker_lines[2])
+
+            uninstall = self.run_uninstall(install_root)
+            self.assertEqual(0, uninstall.returncode, uninstall.stdout + uninstall.stderr)
+            self.assertFalse(install_root.exists())
+
     def test_native_uninstall_refuses_sensitive_project_root(self):
         with tempfile.TemporaryDirectory() as raw:
             install_root = Path(raw) / "project"
@@ -482,7 +582,8 @@ class PublicInstallerContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             install_root = Path(raw) / "locked-install"
             install_root.mkdir()
-            lock = Path(f"{install_root}.lock")
+            self.write_marker(install_root)
+            lock = install_root.parent / ".comic-sol-install.lock"
             lock.mkdir(parents=True)
             (lock / "pid").write_text(f"{os.getpid()}\n", encoding="ascii")
             result = subprocess.run(
@@ -502,7 +603,7 @@ class PublicInstallerContractTests(unittest.TestCase):
             self.assertTrue(lock.is_dir())
 
     @unittest.skipUnless(os.name != "nt", "POSIX installer test")
-    def test_posix_alias_uses_the_canonical_install_lock(self):
+    def test_posix_alias_rejects_symlinked_install_root_before_locking(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             install_root = root / "runtime"
@@ -510,15 +611,16 @@ class PublicInstallerContractTests(unittest.TestCase):
             self.write_marker(install_root)
             alias = root / "runtime-alias"
             alias.symlink_to(install_root, target_is_directory=True)
-            lock = Path(f"{install_root}.lock")
+            lock = install_root / ".comic-sol-install.lock"
             lock.mkdir()
             (lock / "pid").write_text(f"{os.getpid()}\n", encoding="ascii")
 
             result = self.run_uninstall(alias)
 
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("another Comic Sol installer is using this install root", result.stderr)
+            self.assertIn("symlink", result.stderr.lower())
             self.assertTrue((install_root / ".comic-sol-install").is_file())
+            self.assertTrue(lock.is_dir())
 
     @unittest.skipUnless(os.name != "nt", "POSIX installer test")
     def test_posix_cleanup_failure_does_not_roll_back_published_sentinel(self):
@@ -597,6 +699,25 @@ class PublicInstallerContractTests(unittest.TestCase):
             marker_lines = (install_root / ".comic-sol-install").read_text("utf-8").splitlines()
             self.assertEqual("2.0.0rc5", marker_lines[1])
             self.assertIn("Could not remove rollback backup", result.stderr)
+
+    @unittest.skipUnless(os.name != "nt", "POSIX installer test")
+    def test_posix_newline_install_root_round_trips_marker_and_uninstall(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self.write_runtime_archive(root)
+            install_root = root / "runtime\nname"
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            result = subprocess.run(
+                [
+                    "sh", str(self.root / "installers/install.sh"),
+                    "--archive", archive.name, "--sha256", digest,
+                    "--install-root", install_root.name,
+                ], cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            uninstall = self.run_uninstall(install_root)
+            self.assertEqual(0, uninstall.returncode, uninstall.stdout + uninstall.stderr)
+            self.assertFalse(install_root.exists())
 
 
 if __name__ == "__main__":

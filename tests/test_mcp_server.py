@@ -281,6 +281,7 @@ class McpServerUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, "symlink"):
             mcp_server._resolve_project("nested-project")
 
+    @unittest.skipIf(sys.platform == "win32", "Windows requires a fresh symlink scan")
     def test_symlink_scan_is_cached_per_project_and_invalidated_on_change(self):
         project = self.root / "cached-project"
         project.mkdir()
@@ -317,6 +318,7 @@ class McpServerUnitTests(unittest.TestCase):
             mcp_server._resolve_project("cached-project")
         self.assertIsNot(cached, mcp_server._SYMLINK_SCAN_CACHE.get("cached-project"))
 
+    @unittest.skipIf(sys.platform == "win32", "Windows requires a fresh symlink scan")
     def test_symlink_cache_hit_avoids_directory_rescan(self):
         project = self.root / "unchanged-project"
         (project / "nested").mkdir(parents=True)
@@ -331,6 +333,20 @@ class McpServerUnitTests(unittest.TestCase):
             actual = mcp_server._resolve_project("unchanged-project")
 
         self.assertEqual(expected, actual)
+
+    def test_windows_rescan_catches_child_symlink_when_parent_metadata_is_stale(self):
+        project = self.root / "windows-cache-project"
+        nested = project / "nested"
+        nested.mkdir(parents=True)
+        (project / "project.json").write_text("{}", encoding="utf-8")
+        mcp_server._resolve_project("windows-cache-project")
+        outside = Path(self.temporary_directory.name) / "windows-secret.txt"
+        outside.write_text("secret", encoding="utf-8")
+        make_symlink(self, nested / "late-link", outside)
+
+        with mock.patch.object(mcp_server.os, "name", "nt"):
+            with self.assertRaisesRegex(ToolError, "symlink"):
+                mcp_server._resolve_project("windows-cache-project")
 
     @unittest.skipIf(sys.platform == "win32", "requires POSIX symlink semantics")
     def test_symlink_created_during_scan_is_rejected(self):
