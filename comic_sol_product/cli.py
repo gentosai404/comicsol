@@ -5,14 +5,14 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import re
 import sys
 from dataclasses import asdict
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .config import default_output_root
+from .errors import error_payload, format_human_error, safe_error_detail
 
 
 def _engine_package() -> str:
@@ -77,35 +77,23 @@ def _success(command: str, data: Any) -> dict[str, Any]:
     return {"ok": True, "command": command, "data": data, "error": None}
 
 
-def _failure(command: str, category: str, message: str) -> dict[str, Any]:
+def _failure(
+    command: str, error: Exception, *, legacy_category: str | None = None
+) -> dict[str, Any]:
+    payload = error_payload(error, command=command, surface="cli")
+    if legacy_category is not None:
+        payload["legacy_category"] = legacy_category
     return {
         "ok": False,
         "command": command,
         "data": None,
-        "error": {"category": category, "message": message},
+        "error": payload,
     }
 
 
 def _safe_message(error: Exception) -> str:
     """Return an actionable message without local absolute paths."""
-    message = str(error)
-    if not message:
-        return type(error).__name__
-
-    def replace_quoted_path(match: re.Match[str]) -> str:
-        quote, candidate = match.group(1), match.group(2)
-        if PurePosixPath(candidate).is_absolute():
-            return f"{quote}<path>{quote}"
-        if PureWindowsPath(candidate).is_absolute():
-            return f"{quote}<path>{quote}"
-        return match.group(0)
-
-    message = re.sub(r"(['\"])([^'\"]+)\1", replace_quoted_path, message)
-    for token in message.split():
-        candidate = token.strip("'\"(),:;")
-        if candidate and Path(candidate).is_absolute():
-            message = message.replace(candidate, "<path>")
-    return message
+    return safe_error_detail(error)
 
 
 def _run(arguments: argparse.Namespace) -> Any:
@@ -124,9 +112,7 @@ def _run(arguments: argparse.Namespace) -> Any:
         validation = _load_engine_module("validate_project")
 
         try:
-            issues = validation.validate_project(
-                arguments.project_dir, arguments.stage
-            )
+            issues = validation.validate_project(arguments.project_dir, arguments.stage)
         except validation.ProjectValidationError as error:
             issues = error.issues
         return [asdict(issue) for issue in issues]
@@ -148,8 +134,7 @@ def _run(arguments: argparse.Namespace) -> Any:
                 sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
             )
         return [
-            asdict(result)
-            for result in operation(arguments.output_root, **operation_arguments)
+            asdict(result) for result in operation(arguments.output_root, **operation_arguments)
         ]
     raise ValueError(f"unsupported command: {arguments.command}")
 
@@ -181,25 +166,25 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     except (ValueError, TypeError, json.JSONDecodeError) as error:
-        payload = _failure(command, "invalid-input", _safe_message(error))
+        payload = _failure(command, error, legacy_category="invalid-input")
         if arguments.as_json:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         else:
-            print(f"ERROR invalid-input: {payload['error']['message']}", file=sys.stderr)
+            print(format_human_error(error, command=command), file=sys.stderr)
         return 2
     except OSError as error:
-        payload = _failure(command, "io-error", _safe_message(error))
+        payload = _failure(command, error)
         if arguments.as_json:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         else:
-            print(f"ERROR io-error: {payload['error']['message']}", file=sys.stderr)
+            print(format_human_error(error, command=command), file=sys.stderr)
         return 1
     except RuntimeError as error:
-        payload = _failure(command, "missing-extra", _safe_message(error))
+        payload = _failure(command, error)
         if arguments.as_json:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         else:
-            print(f"ERROR missing-extra: {payload['error']['message']}", file=sys.stderr)
+            print(format_human_error(error, command=command), file=sys.stderr)
         return 1
 
 
