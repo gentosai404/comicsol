@@ -27,6 +27,11 @@ from .project_io import contained_project_path, open_path_nofollow
 from .raster_limits import MAX_DECODED_PIXELS
 from .page_quality import validate_page_quality
 from .quality_records import PANEL_CHECK_IDS, validate_quality_checks
+from .schema import (
+    CURRENT_PROJECT_SCHEMA_VERSION,
+    MIN_READER_PROJECT_SCHEMA_VERSION,
+    SUPPORTED_PROJECT_SCHEMA_VERSIONS,
+)
 from .typography import lettering_geometry_hash
 
 from .comic_sol import (
@@ -225,16 +230,29 @@ def validate_manifest(data: dict[str, object]) -> list[ValidationIssue]:
     path = "project.json"
     issues: list[ValidationIssue] = []
     required_fields = {
-        "schema_version", "project_id", "title", "created_at", "updated_at",
+        "project_id", "title", "created_at", "updated_at",
         "status", "input", "settings", "capability", "artifacts",
         "stage_versions", "panels", "warnings",
     }
-    fields = required_fields | {"blocked_from", "blocked_reason"}
+    fields = required_fields | {"schema_version", "blocked_from", "blocked_reason"}
     root = _object(data, fields, required_fields, issues, path, "")
     if root is None:
         return _sorted(issues)
-    if root.get("schema_version") != "1.0":
-        _add(issues, path, "schema_version", "must equal 1.0")
+    schema_version = root.get("schema_version", CURRENT_PROJECT_SCHEMA_VERSION)
+    if (
+        not isinstance(schema_version, str)
+        or schema_version not in SUPPORTED_PROJECT_SCHEMA_VERSIONS
+    ):
+        _add(
+            issues,
+            path,
+            "schema_version",
+            (
+                f"unsupported project schema version {schema_version!r}; "
+                f"reader supports {MIN_READER_PROJECT_SCHEMA_VERSION} through "
+                f"{CURRENT_PROJECT_SCHEMA_VERSION}"
+            ),
+        )
     _identifier(root.get("project_id"), issues, path, "project_id")
     _nonempty_string(root.get("title"), issues, path, "title")
     _timestamp(root.get("created_at"), issues, path, "created_at")

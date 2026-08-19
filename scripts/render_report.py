@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -16,9 +17,16 @@ if __package__ in {None, ""}:
 
 from PIL import Image
 
-from .comic_sol import atomic_write_bytes, atomic_write_json, read_json, sha256_file
-from .project_io import contained_project_path, open_path_nofollow
+from .comic_sol import (
+    ProjectTransaction,
+    atomic_write_bytes,
+    canonical_artifact_bytes,
+    read_json,
+    sha256_file,
+)
+from .project_io import ProjectLock, contained_project_path, open_path_nofollow
 from .quality_records import PANEL_CHECK_IDS
+from .schema import read_project_manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -535,10 +543,10 @@ def _resume(project_dir: Path) -> str:
     ))
 
 
-def render_report(project_dir: Path, output_path: Path | None = None) -> Path:
-    """Render structured QA sections and atomically publish UTF-8 Markdown."""
+def _render_report_locked(project_dir: Path, output_path: Path | None = None) -> Path:
+    """Render structured QA sections and publish the default report atomically."""
     project_dir = Path(project_dir)
-    manifest = read_json(project_dir / "project.json")
+    manifest = read_project_manifest(project_dir / "project.json")
     records = _load_records(project_dir)
     page_records = _load_page_records(project_dir)
     summary = summarize_qa(manifest, records)
@@ -560,30 +568,32 @@ def render_report(project_dir: Path, output_path: Path | None = None) -> Path:
     rendered = template
     for token, content in replacements.items():
         rendered = rendered.replace(token, content)
-    destination = Path(output_path) if output_path is not None else project_dir / "qa/report.md"
-    atomic_write_bytes(destination, (rendered.rstrip() + "\n").encode("utf-8"))
-    if destination == project_dir / "qa/report.md":
-        _record_report_descriptor(project_dir, destination)
+    report_bytes = (rendered.rstrip() + "\n").encode("utf-8")
+
+    if output_path is not None:
+        destination = Path(output_path)
+        atomic_write_bytes(destination, report_bytes)
+        return destination
+
+    destination = project_dir / "qa/report.md"
+    with ProjectTransaction(project_dir, "report-publish") as transaction:
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+        artifacts["qa_report"] = {
+            "path": "qa/report.md",
+            "sha256": hashlib.sha256(report_bytes).hexdigest(),
+        }
+        manifest["artifacts"] = artifacts
+        transaction.stage_bytes("qa/report.md", report_bytes)
+        transaction.stage_bytes("project.json", canonical_artifact_bytes(manifest))
     return destination
 
 
-def _record_report_descriptor(project_dir: Path, report_path: Path) -> None:
-    """Record the qa_report descriptor final validation requires.
-
-    Mirrors ``export_pdf.guarded_export`` recording the pdf descriptor, so the
-    stage-by-stage route reaches a valid terminal state without a manual edit.
-    """
-    manifest_path = project_dir / "project.json"
-    manifest = read_json(manifest_path)
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, dict):
-        artifacts = {}
-    artifacts["qa_report"] = {
-        "path": "qa/report.md",
-        "sha256": sha256_file(report_path),
-    }
-    manifest["artifacts"] = artifacts
-    atomic_write_json(manifest_path, manifest)
+def render_report(project_dir: Path, output_path: Path | None = None) -> Path:
+    """Render a report and descriptor from one locked project snapshot."""
+    with ProjectLock(Path(project_dir)):
+        return _render_report_locked(Path(project_dir), output_path)
 
 
 def _build_parser() -> argparse.ArgumentParser:

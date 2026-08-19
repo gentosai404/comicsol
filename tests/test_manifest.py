@@ -27,7 +27,14 @@ from scripts.comic_sol import (  # noqa: E402
     slugify,
     transition,
 )
-from scripts.project_io import ProjectTransaction
+from scripts.project_io import ProjectTransaction  # noqa: E402
+from scripts.schema import (  # noqa: E402
+    CURRENT_PROJECT_SCHEMA_VERSION,
+    MIN_READER_PROJECT_SCHEMA_VERSION,
+    UnsupportedSchemaVersionError,
+    migrate_project_manifest,
+    read_project_manifest,
+)
 from scripts import comic_sol, letter_panels  # noqa: E402
 
 
@@ -54,6 +61,90 @@ class ManifestTests(unittest.TestCase):
             },
             manifest["stage_versions"],
         )
+
+    def test_project_schema_contract_is_explicit_and_readable(self):
+        self.assertEqual("1.0", CURRENT_PROJECT_SCHEMA_VERSION)
+        self.assertEqual("1.0", MIN_READER_PROJECT_SCHEMA_VERSION)
+        project = init_project(
+            self.root,
+            "Schema Contract",
+            b"Schema contract source",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        manifest = read_project_manifest(project / "project.json")
+        self.assertEqual("1.0", manifest["schema_version"])
+
+    def test_legacy_manifest_without_schema_version_is_normalized_without_write(self):
+        project = init_project(
+            self.root,
+            "Legacy Schema",
+            b"Schema contract source",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        manifest_path = project / "project.json"
+        manifest = read_json(manifest_path)
+        manifest.pop("schema_version")
+        atomic_write_json(manifest_path, manifest)
+        before = manifest_path.read_bytes()
+
+        read_manifest = read_project_manifest(manifest_path)
+        self.assertEqual(CURRENT_PROJECT_SCHEMA_VERSION, read_manifest["schema_version"])
+        self.assertEqual(before, manifest_path.read_bytes())
+        migrated = migrate_project_manifest(project)
+        self.assertEqual(CURRENT_PROJECT_SCHEMA_VERSION, migrated["schema_version"])
+        self.assertEqual(before, manifest_path.read_bytes())
+
+    def test_unsupported_project_schema_is_rejected_without_mutation(self):
+        project = init_project(
+            self.root,
+            "Unsupported Schema",
+            b"Schema contract source",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        manifest_path = project / "project.json"
+        original = manifest_path.read_bytes()
+        manifest = read_json(manifest_path)
+        manifest["schema_version"] = "9.0"
+        atomic_write_json(manifest_path, manifest)
+        unsupported = manifest_path.read_bytes()
+        with self.assertRaisesRegex(UnsupportedSchemaVersionError, "project schema 9.0"):
+            read_project_manifest(manifest_path)
+        self.assertEqual(unsupported, manifest_path.read_bytes())
+        self.assertNotEqual(original, manifest_path.read_bytes())
+
+    def test_migration_failure_preserves_project_bytes(self):
+        project = init_project(
+            self.root,
+            "Migration Failure",
+            b"Schema contract source",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        manifest_path = project / "project.json"
+        manifest = read_json(manifest_path)
+        manifest["schema_version"] = "0.9"
+        atomic_write_json(manifest_path, manifest)
+        before = manifest_path.read_bytes()
+        with self.assertRaisesRegex(UnsupportedSchemaVersionError, "no migration path"):
+            migrate_project_manifest(project)
+        self.assertEqual(before, manifest_path.read_bytes())
+
+    def test_project_schema_rejects_non_string_versions_consistently(self):
+        project = init_project(
+            self.root,
+            "Malformed Schema",
+            b"Schema contract source",
+            {"mode": "short_prompt", "language": "en"},
+        )
+        manifest_path = project / "project.json"
+        manifest = read_json(manifest_path)
+        manifest["schema_version"] = ["1.0"]
+        atomic_write_json(manifest_path, manifest)
+        with self.assertRaisesRegex(UnsupportedSchemaVersionError, "project schema"):
+            read_project_manifest(manifest_path)
+        before = manifest_path.read_bytes()
+        with self.assertRaisesRegex(UnsupportedSchemaVersionError, "project schema"):
+            transition(project, "BLOCKED", "unsupported schema")
+        self.assertEqual(before, manifest_path.read_bytes())
 
     def test_init_preserves_source_and_creates_complete_skeleton(self):
         request = {"mode": "short_prompt", "language": "en"}
@@ -362,7 +453,7 @@ class ManifestTests(unittest.TestCase):
         project = init_project(
             self.root,
             "CLI Story",
-            b"Story",
+            b"CLI source",
             {"mode": "short_prompt", "language": "en"},
         )
         output = io.StringIO()
@@ -370,6 +461,22 @@ class ManifestTests(unittest.TestCase):
             result = main(["status", os.fspath(project), "--json"])
         self.assertEqual(0, result)
         self.assertEqual("INIT", json.loads(output.getvalue())["status"])
+
+    def test_cli_manifest_reads_accept_relative_project_paths(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            project = init_project(
+                Path(temporary),
+                "Relative CLI Story",
+                b"CLI source",
+                {"mode": "short_prompt", "language": "en"},
+            )
+            relative = os.path.relpath(project, Path.cwd())
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(0, main(["status", relative, "--json"]))
+                self.assertEqual(0, main(["transition", relative, "PLANNED"]))
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(0, main(["invalidate", relative, "storyboard"]))
 
 
 class SourceBoundaryTests(unittest.TestCase):

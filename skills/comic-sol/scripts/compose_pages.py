@@ -21,10 +21,17 @@ from .comic_sol import (
     PAGE_WIDTH,
     atomic_write_bytes,
     canonical_artifact_bytes,
+    read_project_manifest,
     read_json,
 )
 from .layouts import LAYOUT_VERSION, get_layout, match_layout, validate_custom_layout
-from .project_io import ProjectTransaction, contained_project_path, read_contained_bytes
+from .project_io import (
+    PROJECT_OPERATION_LOCK_TIMEOUT,
+    ProjectLock,
+    ProjectTransaction,
+    contained_project_path,
+    read_contained_bytes,
+)
 
 COMPOSITION_CACHE_PATH = "cache/composition.json"
 
@@ -175,7 +182,7 @@ def _read_source_payloads(
     ]
 
 
-def compose_page(
+def _compose_page_locked(
     project_dir: Path,
     page_number: int,
     storyboard: dict,
@@ -199,11 +206,28 @@ def compose_page(
     return output_path
 
 
-def compose_all_pages(project_dir: Path) -> list[Path]:
+def compose_page(
+    project_dir: Path,
+    page_number: int,
+    storyboard: dict,
+    manifest_settings: dict,
+    source_artifacts: dict,
+) -> Path:
+    """Compose one page while holding the project operation lock."""
+    with ProjectLock(Path(project_dir), timeout=PROJECT_OPERATION_LOCK_TIMEOUT):
+        return _compose_page_locked(
+            project_dir, page_number, storyboard, manifest_settings, source_artifacts
+        )
+
+
+def _compose_all_pages_locked(project_dir: Path) -> list[Path]:
     """Compose every storyboard page in numeric order after a complete preflight."""
     project_dir = Path(project_dir)
     storyboard = read_json(contained_project_path(project_dir, "plan/storyboard.json", must_exist=True))
-    manifest = read_json(contained_project_path(project_dir, "project.json", must_exist=True))
+    manifest = read_project_manifest(
+        contained_project_path(project_dir, "project.json", must_exist=True),
+        normalize_legacy=False,
+    )
     settings = manifest.get("settings")
     artifacts = manifest.get("artifacts", {})
     if not isinstance(settings, dict) or not isinstance(artifacts, dict):
@@ -273,7 +297,9 @@ def compose_all_pages(project_dir: Path) -> list[Path]:
             output_paths.append(project_dir / relative)
         transaction.stage_bytes(COMPOSITION_CACHE_PATH, cache_payload)
         # Re-read under the lock so a concurrent writer's manifest is not lost.
-        locked_manifest = read_json(project_dir / "project.json")
+        locked_manifest = read_project_manifest(
+            project_dir / "project.json", normalize_legacy=False
+        )
         descriptors = locked_manifest.get("artifacts")
         if not isinstance(descriptors, dict):
             descriptors = {}
@@ -287,6 +313,12 @@ def compose_all_pages(project_dir: Path) -> list[Path]:
         )
         transaction.commit()
     return output_paths
+
+
+def compose_all_pages(project_dir: Path) -> list[Path]:
+    """Compose every storyboard page under one consistent project snapshot."""
+    with ProjectLock(Path(project_dir), timeout=PROJECT_OPERATION_LOCK_TIMEOUT):
+        return _compose_all_pages_locked(Path(project_dir))
 
 
 def compose_project(project_dir: Path) -> list[Path]:
@@ -311,15 +343,33 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.all_pages:
             paths = compose_all_pages(arguments.project_dir)
         else:
-            storyboard = read_json(contained_project_path(arguments.project_dir, "plan/storyboard.json", must_exist=True))
-            manifest = read_json(contained_project_path(arguments.project_dir, "project.json", must_exist=True))
-            settings = manifest.get("settings")
-            artifacts = manifest.get("artifacts", {})
-            if not isinstance(settings, dict) or not isinstance(artifacts, dict):
-                raise ValueError("manifest settings and artifacts must be objects")
-            paths = [compose_page(
-                arguments.project_dir, arguments.page, storyboard, settings, artifacts
-            )]
+            with ProjectLock(
+                Path(arguments.project_dir), timeout=PROJECT_OPERATION_LOCK_TIMEOUT
+            ):
+                storyboard = read_json(
+                    contained_project_path(
+                        arguments.project_dir, "plan/storyboard.json", must_exist=True
+                    )
+                )
+                manifest = read_project_manifest(
+                    contained_project_path(
+                        arguments.project_dir, "project.json", must_exist=True
+                    ),
+                    normalize_legacy=False,
+                )
+                settings = manifest.get("settings")
+                artifacts = manifest.get("artifacts", {})
+                if not isinstance(settings, dict) or not isinstance(artifacts, dict):
+                    raise ValueError("manifest settings and artifacts must be objects")
+                paths = [
+                    _compose_page_locked(
+                        arguments.project_dir,
+                        arguments.page,
+                        storyboard,
+                        settings,
+                        artifacts,
+                    )
+                ]
         print("\n".join(path.as_posix() for path in paths))
         return 0
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
