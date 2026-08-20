@@ -149,6 +149,27 @@
   than migrated in place, and `templates/page-qa.json` stubs the new checks as
   `migration-required`. No `project.json` schema version is affected.
 
+- **The `dialogue_correctness` benchmark metric now measures a wider check set.**
+  `DIALOGUE_PAGE_CHECK_IDS` in `scripts/benchmark.py` gains `balloon-subject-obstruction`
+  and `bubble-tail-geometry`, so the metric covers every deterministic, error-severity page
+  check that verifies dialogue geometry rather than the three it counted before a tail or
+  speaker-clearance regression was enforced by the pipeline. `balloon-crowding` stays
+  excluded by design: it never fails, only warns, so counting it would conflate reading
+  comfort with correctness. Both committed cases still report `1.0`, but the denominator per
+  dialogue-bearing page grows by two, so recorded numerators and denominators — including
+  `observations.dialogue_checks_passed`/`dialogue_checks_total` — change even where the
+  ratio does not.
+
+- **`HARNESS_VERSION` is now `"2"`, so benchmark result records produced by the previous
+  harness are no longer comparable.** The result schema is unchanged, which is exactly the
+  hazard: a harness-1 record still validates while measuring a narrower
+  `dialogue_correctness`, so pooling or diffing it against a current run would report a
+  definition change as a metric change. `summarize_results()` already rejected foreign
+  harness versions; `diff_results()` now does too, and reports the stale side as an
+  exception instead of a clean verdict. Re-run the benchmark rather than reusing archived
+  pre-bump results; `.github/workflows/benchmark.yml` already benchmarks the baseline
+  revision with the current harness, so CI needs no change.
+
 ### Removed
 
 - Removed the unwired `comic_sol_product.providers` Python API. Integrations must
