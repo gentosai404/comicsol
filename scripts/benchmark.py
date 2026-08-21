@@ -69,6 +69,7 @@ from .pdf_quality import (
     MAX_HIGH_ERROR_PIXEL_RATIO,
     MAX_MEAN_ABSOLUTE_CHANNEL_ERROR,
 )
+from .project_io import PROJECT_OPERATION_LOCK_TIMEOUT, ProjectLock
 from .quality_sample import build_evidence_record
 from .raster_limits import MAX_DECODED_PIXELS
 from .stage_registry import RESUME_STAGES
@@ -852,19 +853,19 @@ def _write_page_records(
                 "reviewer": REVIEWER,
                 "severity": "error" if proven else "warning",
             }
-        # build_page_quality_record requires the reviewer checks in canonical order.
+        # The current harness is copied into the baseline checkout by CI, so use
+        # page-quality APIs shared by both engine revisions. The outer lock spans
+        # derivation and publication; current helpers simply re-enter it.
         checks = [by_id[check_id] for check_id in SUBJECTIVE_PAGE_CHECK_IDS]
-        write_page_quality_record(
-            project,
-            page_number,
-            build_page_quality_record(
+        with ProjectLock(project, timeout=PROJECT_OPERATION_LOCK_TIMEOUT):
+            record = build_page_quality_record(
                 project,
                 page_number,
                 checks,
                 reviewer=REVIEWER,
                 reviewed_at=REVIEW_TIMESTAMP,
-            ),
-        )
+            )
+            write_page_quality_record(project, page_number, record)
     return dialogue_count
 
 
