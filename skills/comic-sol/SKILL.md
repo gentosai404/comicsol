@@ -34,14 +34,16 @@ reporting to the bundled Python scripts.
    `record-stage` so resume can reuse honest cache keys.
 4. Detect image capability from tools exposed in the current agent session. Do not ask
    deterministic scripts to discover or call an image provider.
-5. Generate canonical references and panels into attempt paths. Require the image model
-   to draw each exact storyboard SFX in the artwork, inspect every result visually, record
-   all seven QA checks, and selectively repair only failures within budget.
-6. Promote accepted attempts; deterministically letter dialogue and captions while
-   validating and counting exact storyboard SFX without drawing it in Pillow; compose
-   pages, inspect every composed page and write its `qa/pages/page-{NNN}.json` record,
-   export the PDF, render the QA report (which projects the terminal status the project
-   is about to reach), validate final integrity, then transition to that terminal status.
+5. Generate canonical references and panels into attempt paths. Require the image model to
+   draw each exact `generated-visual` storyboard SFX and never a `deterministic-lettering`
+   one, inspect every result visually, record all seven QA checks, and repair only failures
+   within budget. Route a bad effect to lettering with `sfx_repair.py` and follow its
+   `next_action`: ink the model drew needs a `regenerate` review, not re-lettering alone.
+6. Promote accepted attempts; deterministically letter dialogue, captions, and any
+   `deterministic-lettering` SFX while validating and counting exact `generated-visual`
+   storyboard SFX without drawing it in Pillow; compose pages, inspect every composed page
+   and write its `qa/pages/page-{NNN}.json` record, export the PDF, render the QA report
+   (which projects the terminal status), validate final integrity, then transition to it.
 7. Return status, counts, warnings, and clickable project output paths.
 
 ## Token budget rules
@@ -205,6 +207,7 @@ PYTHON scripts/comic_sol.py promote-attempt PROJECT_DIR PANEL_ID PATH
 PYTHON scripts/comic_sol.py override-panel PROJECT_DIR PANEL_ID --reason TEXT
 
 PYTHON scripts/letter_panels.py PROJECT_DIR [--font PATH]
+PYTHON scripts/sfx_repair.py PROJECT_DIR --panel PANEL_ID --text-id TEXT_ID --reason TEXT
 PYTHON scripts/compose_pages.py PROJECT_DIR --all
 PYTHON scripts/compose_pages.py PROJECT_DIR --page N
 PYTHON scripts/export_pdf.py PROJECT_DIR [--output PATH]
