@@ -14,27 +14,32 @@ release notes for a tag live in `docs/releases/v<tag>.md`, and the per-change re
 
 | Milestone | Issues | Status | Released |
 |---|---:|---|---|
-| v2.0 — Stability | 10 | Delivered | No — in `CHANGELOG.md` under Unreleased |
-| v2.1 — Reliability & DX | 8 | Delivered | No — in `CHANGELOG.md` under Unreleased |
-| v2.2 — Comic Quality | 10 | Delivered | No — in `CHANGELOG.md` under Unreleased |
+| v2.0 — Stability | 10 | Delivered | Pending — `2.0.0rc5` |
+| v2.1 — Reliability & DX | 8 | Delivered | Pending — `2.0.0rc5` |
+| v2.2 — Comic Quality | 10 | Delivered | Pending — `2.0.0rc5` |
 | v2.3 — User Experience | 7 | Planned | — |
 
-**No completed milestone is released yet.** This is the point most easily got wrong, so it is
-stated precisely: the four `2.0.0rc*` prereleases shipped the v2.0 *product line* on
-2026-07-29/30, but every issue in the v2.0 *milestone* merged on 2026-08-18/19 — after `rc4`
-was published. The milestone hardened and qualified what the prereleases had already shipped;
-it is not what they contain.
+All 28 delivered issues across v2.0, v2.1, and v2.2 are **prepared for `2.0.0rc5`, which is
+not published**: the tag does not exist, no artifact has been built, and the release
+qualification gate has not been run. `Pending` means exactly that, and it becomes `Yes` when
+the tag is published. The published version is `2.0.0rc4`.
 
-So all 28 delivered issues across v2.0, v2.1, and v2.2 ship in the first tag cut after
-`2.0.0rc4`. Until then `CHANGELOG.md` holds them under Unreleased. The published version is
-`2.0.0rc4`.
+`2.0.0rc5` will still be a prerelease when it ships:
+`docs/releases/v2.0-stable-criteria.md` is the gate for a stable `2.0.0` tag and is not yet
+satisfied.
+
+One point is easily got wrong, so it is stated precisely: the four earlier `2.0.0rc*`
+prereleases shipped the v2.0 *product line* on 2026-07-29/30, but every issue in the v2.0
+*milestone* merged on 2026-08-18/19 — after `rc4` was published. The milestone hardened and
+qualified what those prereleases had already shipped; it is not what they contain. That is why
+v2.0 is carried by `2.0.0rc5` alongside v2.1 and v2.2.
 
 ### Delivery timeline
 
 The two halves of this table are the whole argument, so they are recorded as data rather than
 prose. Merge windows are the first and last closing pull request of each milestone; publish
-dates are the released tags. Every milestone merged *after* the last tag was published, which
-is why the `Released` column above is `No` throughout.
+dates are the released tags; a tag with no date is prepared rather than published. Every
+milestone merged after `2.0.0rc4` was published, which is why none is carried by an earlier tag.
 
 | Milestone | Merged |
 |---|---|
@@ -42,21 +47,22 @@ is why the `Released` column above is `No` throughout.
 | v2.1 — Reliability & DX | 2026-08-19 … 2026-08-20 |
 | v2.2 — Comic Quality | 2026-08-20 … 2026-08-21 |
 
-| Tag | Published |
-|---|---|
-| `2.0.0rc1` | 2026-07-29 |
-| `2.0.0rc2` | 2026-07-30 |
-| `2.0.0rc3` | 2026-07-30 |
-| `2.0.0rc4` | 2026-07-30 |
+| Tag | Published | Status |
+|---|---|---|
+| `2.0.0rc1` | 2026-07-29 | Published |
+| `2.0.0rc2` | 2026-07-30 | Published |
+| `2.0.0rc3` | 2026-07-30 | Published |
+| `2.0.0rc4` | 2026-07-30 | Published |
+| `2.0.0rc5` | — | Prepared; not tagged |
 
 ## v2.0 — Stability
 
 Hardened and qualified the product line the `2.0.0rc*` prereleases had already shipped:
 end-to-end and failure-injection coverage, resume idempotence, structured diagnostics and
 error codes, schema-migration safety, and a release qualification gate. Every issue here
-merged on 2026-08-18/19, after `rc4` was published on 2026-07-30, so **none of it is in a
-released version** — a distinction worth keeping, because the milestone shares its name with
-the shipped prereleases.
+merged on 2026-08-18/19, after `rc4` was published on 2026-07-30, so **none of it is in an
+earlier tag** — a distinction worth keeping, because the milestone shares its name with the
+prereleases that preceded it. It is prepared for `2.0.0rc5`.
 
 The release gate for the stable tag is `docs/releases/v2.0-stable-criteria.md`, which is
 authoritative over this document for anything gating a release.

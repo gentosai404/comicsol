@@ -1,5 +1,9 @@
 # Install Comic Sol v2.0.0rc4
 
+> `v2.0.0rc5` is prepared in the repository but **not yet published**. These instructions name
+> `v2.0.0rc4`, the latest published prerelease, because those are the archives that exist.
+> They are updated to name `v2.0.0rc5` when that tag is published.
+
 Comic Sol `v2.0.0rc4` is a prerelease distributed as native portable archives for Linux, macOS, and Windows, plus a Python wheel/source archive and an OCI image definition. Native archives bundle Python 3.11, Pillow, MCP, fonts, templates, the Skill, and references; no system Python is required after extraction.
 
 > **First time installing Comic Sol?** Start with
