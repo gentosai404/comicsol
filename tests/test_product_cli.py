@@ -1,6 +1,8 @@
 import io
 import json
+import shutil
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -10,6 +12,8 @@ from comic_sol_product import __version__
 
 from comic_sol_product import cli
 from comic_sol_product.config import default_output_root
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 class ProductCliTests(unittest.TestCase):
@@ -396,6 +400,98 @@ class ProductCliTests(unittest.TestCase):
             self.assertIs(expected, cli._run(arguments))
 
         self.assertEqual([Path("/tmp/project")], seen)
+
+    def test_human_status_renders_visual_summary_on_stdout(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "valid-one-page"
+            shutil.copytree(_FIXTURES / "valid-one-page", project)
+
+            code, stdout, stderr = self.invoke(["status", str(project)])
+
+        self.assertEqual(0, code)
+        # The stable one-line contract stays the first line for scripts.
+        self.assertEqual("valid-one-page: QA_READY", stdout.splitlines()[0])
+        # The visual summary adds per-stage, panel, and next-action sections.
+        self.assertIn("Stages:", stdout)
+        self.assertIn("planning:", stdout)
+        self.assertIn("Panels: 3 accepted, 0 failed, 0 pending", stdout)
+        self.assertIn("Next action:", stdout)
+        # Human output stays plain: no ANSI colour escapes.
+        self.assertNotIn("\x1b[", stdout)
+
+    def test_human_status_surfaces_unreadable_panel_records(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "valid-one-page"
+            shutil.copytree(_FIXTURES / "valid-one-page", project)
+            (project / "qa/panels/p01-02.json").write_text("{ broken", encoding="utf-8")
+
+            code, stdout, stderr = self.invoke(["status", str(project)])
+
+        self.assertEqual(0, code)
+        self.assertIn("Panels: 2 accepted, 0 failed, 0 pending", stdout)
+        self.assertIn("unreadable", stdout)
+
+    def test_human_status_escapes_terminal_controls_in_all_project_fields(self):
+        """Project values stay visible without becoming terminal instructions."""
+        expected = {"project_id": "project", "status": "COMPLETE"}
+        malicious_warning = "warning \x1b[31mred\x1b[0m and \x1b[2J clear"
+        expected_summary = {
+            "project_id": "project\x1b]0;renamed\x07",
+            "status": "COMPLETE\rINJECTED",
+            "stages": [{"stage": "generation\nforged", "state": "blocked\tfake"}],
+            "panels": {"accepted": "0\x1b[2J", "failed": 0, "pending": 1},
+            "warnings": [malicious_warning],
+            "blocked_reason": "unsafe\x1b[?25l",
+            "next_action": {"required": "capability\x1b[5m available"},
+        }
+
+        class FakeEngine:
+            def read_project_status(self, project_dir):
+                return expected
+
+        class FakeCommandService:
+            def __init__(self, **kwargs):
+                pass
+
+            def execute(self, command, **kwargs):
+                return expected if command == "status" else expected_summary
+
+        fake_module = types.SimpleNamespace(CommandService=FakeCommandService)
+        with (
+            mock.patch.object(cli, "_load_engine", return_value=FakeEngine()),
+            mock.patch.object(cli, "_load_command_service", return_value=fake_module),
+        ):
+            code, stdout, stderr = self.invoke(["status", "/tmp/project"])
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr)
+        self.assertNotIn("\x1b", stdout)
+        self.assertNotIn("\r", stdout)
+        self.assertNotIn("\t", stdout)
+        self.assertIn("project\\x1b]0;renamed\\x07: COMPLETE\\rINJECTED", stdout)
+        self.assertIn("generation\\nforged: blocked\\tfake", stdout)
+        self.assertIn("0\\x1b[2J accepted", stdout)
+        self.assertIn("warning \\x1b[31mred\\x1b[0m", stdout)
+        self.assertIn("Blocked reason: unsafe\\x1b[?25l", stdout)
+        self.assertIn("capability\\x1b[5m available", stdout)
+
+    def test_json_status_envelope_stays_the_unchanged_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project = Path(temporary_directory) / "valid-one-page"
+            shutil.copytree(_FIXTURES / "valid-one-page", project)
+            expected_manifest = json.loads((project / "project.json").read_text("utf-8"))
+
+            code, stdout, stderr = self.invoke(["--json", "status", str(project)])
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr)
+        payload = json.loads(stdout)
+        self.assertEqual({"ok", "command", "data", "error"}, set(payload))
+        self.assertTrue(payload["ok"])
+        self.assertEqual("status", payload["command"])
+        # The machine-readable status is exactly the recovered manifest; the
+        # visual summary never leaks into the JSON envelope.
+        self.assertEqual(expected_manifest, payload["data"])
 
     def test_human_lifecycle_progress_is_stage_aware_and_plain(self):
         events = [

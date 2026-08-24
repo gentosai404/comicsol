@@ -144,6 +144,130 @@ def _safe_message(error: Exception) -> str:
     return safe_error_detail(error)
 
 
+_STAGE_STATE_GLYPH = {
+    "complete": "[x]",
+    "stale": "[~]",
+    "blocked": "[!]",
+    "pending": "[ ]",
+}
+
+
+def _escape_terminal_controls(value: object) -> str:
+    """Return text with every terminal control character visibly escaped.
+
+    Status values originate in project files. Rendering raw C0/C1 controls
+    would allow ANSI/OSC sequences, line injection, or cursor movement. Escape
+    the control byte itself instead of deleting it so diagnostics retain the
+    original content without letting a terminal interpret it.
+    """
+    escaped: list[str] = []
+    for char in str(value):
+        codepoint = ord(char)
+        if codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+            escaped.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(char, f"\\x{codepoint:02x}"))
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+
+def _format_next_action(next_action: object) -> str:
+    """Render the single recommended next step as a stable human line.
+
+    The summary reuses the resume plan's own vocabulary: ``command`` and
+    ``agent_required`` come straight from ``_next_resume_action``, ``done`` marks
+    a terminal project, and ``resume``/``required`` describe a blocked one. An
+    unrecognized shape is shown verbatim so a diagnostic is never swallowed.
+    """
+    if not isinstance(next_action, dict) or not next_action:
+        return "Next action: none — nothing to do."
+    if "done" in next_action:
+        return f"Next action: {_escape_terminal_controls(next_action['done'])}."
+    if "command" in next_action:
+        return f"Next action: run `{_escape_terminal_controls(next_action['command'])}`."
+    if "agent_required" in next_action:
+        stage = _escape_terminal_controls(next_action["agent_required"])
+        return f"Next action: agent must produce the {stage} stage."
+    if "resume" in next_action:
+        reason = _escape_terminal_controls(next_action["resume"])
+        return f"Next action: run `resume` to recover (blocked: {reason})."
+    if "required" in next_action:
+        requirement = _escape_terminal_controls(next_action["required"])
+        return f"Next action: blocked until {requirement}; then run `resume`."
+    key, value = next(iter(next_action.items()))
+    return f"Next action: {_escape_terminal_controls(key)}={_escape_terminal_controls(value)}."
+
+
+def _render_status_summary(summary: dict[str, Any]) -> str:
+    """Render the visual project-status summary as plain, uncolored text.
+
+    Errors are surfaced, never decorated away: unreadable panel QA records and
+    active warnings each get their own line so a corrupt-but-diagnosable project
+    stays legible. The first line keeps the stable ``<project_id>: <STATUS>``
+    contract that scripts have parsed from the human surface.
+    """
+    project_id = _escape_terminal_controls(summary.get("project_id"))
+    status = _escape_terminal_controls(summary.get("status"))
+    lines = [f"{project_id}: {status}"]
+
+    stages = summary.get("stages")
+    if isinstance(stages, list) and stages:
+        lines.append("Stages:")
+        for entry in stages:
+            if not isinstance(entry, dict):
+                continue
+            raw_state = str(entry.get("state", "pending"))
+            state = _escape_terminal_controls(raw_state)
+            stage = _escape_terminal_controls(entry.get("stage"))
+            glyph = _STAGE_STATE_GLYPH.get(raw_state, "[ ]")
+            lines.append(f"  {glyph} {stage}: {state}")
+
+    panels = summary.get("panels")
+    if isinstance(panels, dict) and panels:
+        accepted = _escape_terminal_controls(panels.get("accepted", 0))
+        failed = _escape_terminal_controls(panels.get("failed", 0))
+        pending = _escape_terminal_controls(panels.get("pending", 0))
+        lines.append(f"Panels: {accepted} accepted, {failed} failed, {pending} pending")
+        unreadable = panels.get("unreadable", 0)
+        if isinstance(unreadable, int) and unreadable > 0:
+            lines.append(f"  WARNING: {unreadable} panel QA record(s) unreadable.")
+
+    blocked_reason = summary.get("blocked_reason")
+    if isinstance(blocked_reason, str) and blocked_reason:
+        lines.append(f"Blocked reason: {_escape_terminal_controls(blocked_reason)}")
+
+    warnings = summary.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        lines.append(f"Warnings ({len(warnings)}):")
+        for warning in warnings:
+            lines.append(f"  - {_escape_terminal_controls(warning)}")
+
+    lines.append(_format_next_action(summary.get("next_action")))
+    return "\n".join(lines)
+
+
+def _render_status(arguments: argparse.Namespace) -> str:
+    """Compute and render the human status view for one project.
+
+    A rich summary is preferred, but an older engine that only knows the stable
+    manifest reader falls back to the canonical one-line view so the human
+    surface always prints something parseable.
+    """
+    service = _load_command_service().CommandService(engine=_load_engine())
+    summary = service.execute("status-summary", project_dir=arguments.project_dir)
+    if isinstance(summary, dict) and "stages" in summary:
+        return _render_status_summary(summary)
+    # Fallback: a plain manifest without the visual summary fields.
+    project_id = (
+        _escape_terminal_controls(summary.get("project_id"))
+        if isinstance(summary, dict)
+        else "None"
+    )
+    status = (
+        _escape_terminal_controls(summary.get("status")) if isinstance(summary, dict) else "None"
+    )
+    return f"{project_id}: {status}"
+
+
 def _validate_init_arguments(arguments: argparse.Namespace) -> None:
     """Keep the wizard opt-in and the automation path fully non-interactive."""
     if arguments.command != "init":
@@ -466,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "init":
             print(data["project_id"])
         elif command == "status":
-            print(f"{data['project_id']}: {data['status']}")
+            print(_render_status(arguments))
         elif command in {"setup", "repair", "uninstall"}:
             for result in data:
                 print(f"{result['client']}: {result['status']} — {result['message']}")
